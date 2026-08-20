@@ -35,7 +35,7 @@ class FakeTransport:
             if params["conids"] == "4815747":
                 return [{"conid": 4815747, "31": "101.25"}]
             return [
-                {"conid": conid, "84": "1.1", "86": "1.2", "7308": "-0.25", "7310": "-0.04", "7633": "0.32", "7698": "1200"}
+                {"conid": conid, "84": "1.1", "86": "1.2", "7308": "-0.25", "7310": "-0.04", "7633": "0.32", "7638": "1200", "6509": "RpB"}
                 for conid in params["conids"].split(",")
             ]
         raise AssertionError(path)
@@ -52,8 +52,8 @@ class DiagnosticTest(TestCase):
                 responses = [
                     [{"conidEx": "101@SMART"}, {"conidEx": "102@SMART"}],
                     [{"conid": 101, "84": "C1.10", "86": "1.20"}, {"conid": 102, "84": "2.10"}],
-                    [{"conid": 101, "7308": "-0.25", "7310": "-0.04", "7633": "32%", "7698": "1.2K"},
-                     {"conid": 102, "86": "2.20", "7308": "-0.30", "7310": "-0.05", "7633": "0.35", "7698": 900}],
+                    [{"conid": 101, "7308": "-0.25", "7310": "-0.04", "7633": "32%", "7638": "1.2K", "6509": "RpB"},
+                     {"conid": 102, "86": "2.20", "7308": "-0.30", "7310": "-0.05", "7633": "0.35", "7638": 900, "6509": "D"}],
                 ]
                 return responses[len(self.calls) - 1]
 
@@ -63,10 +63,31 @@ class DiagnosticTest(TestCase):
         )
 
         self.assertEqual(len(transport.calls), 3)  # pre-flight + dos entregas diferidas
-        self.assertTrue(all(call[1]["fields"] == "84,86,7308,7310,7633,7698" for call in transport.calls))
+        self.assertTrue(all(call[1]["fields"] == "84,86,7308,7310,7633,7638,6509" for call in transport.calls))
         self.assertEqual((quotes[0].bid, quotes[0].implied_volatility, quotes[0].open_interest), (1.1, 32.0, 1200))
         self.assertEqual(quotes[1].ask, 2.2)
         self.assertTrue(all(status is MarketDataFieldStatus.AVAILABLE for quote in quotes for status in quote.field_statuses.values()))
+        self.assertEqual(quotes[0].market_data_availability.display, "RpB (RealTime, book disponible)")
+        self.assertEqual(quotes[1].market_data_availability.feed, "Delayed")
+
+    def test_market_data_availability_interprets_status_incomplete_and_book(self):
+        class AvailabilityTransport:
+            def __init__(self): self.calls = 0
+            def get(self, path, params):
+                self.calls += 1
+                return [{"conid": 101}] if self.calls == 1 else [
+                    {"conid": 101, "31": "1.15", "7308": "-.25", "7310": "-.04", "6509": "NiB"}
+                ]
+
+        quote = IbkrMarketDataProvider(
+            AvailabilityTransport(), snapshot_attempts=1, snapshot_retry_delay=0
+        ).get_put_quotes((("101", 100.0),), __import__("datetime").date(2026, 9, 1))[0]
+
+        self.assertEqual(quote.market_data_availability.raw, "NiB")
+        self.assertEqual(quote.market_data_availability.feed, "Not Subscribed")
+        self.assertTrue(quote.market_data_availability.incomplete)
+        self.assertTrue(quote.market_data_availability.book)
+        self.assertIs(quote.field_statuses["bid"], MarketDataFieldStatus.PARTIAL_RESPONSE)
 
     def test_option_snapshot_classifies_not_ready_unavailable_and_partial(self):
         class IncompleteTransport:
@@ -147,7 +168,25 @@ class DiagnosticTest(TestCase):
         self.assertIn("Precio subyacente: 101.25", text)
         self.assertIn("Strikes PUT seleccionados: 100, 105", text)
         self.assertIn("-0.25 | -0.04 | 0.32 | 1200", text)
+        self.assertIn("RpB (RealTime, book disponible)", text)
         self.assertEqual([call[0] for call in transport.calls].count("/iserver/secdef/info"), 2)
+
+    def test_derivative_workflow_requires_search_and_orders_it_before_market_data(self):
+        transport = FakeTransport()
+        provider = IbkrMarketDataProvider(transport, snapshot_retry_delay=0)
+        with self.assertRaisesRegex(IncompleteDataError, "secdef/search"):
+            provider.get_put_strikes("4815747", __import__("datetime").date(2026, 9, 1))
+
+        run(provider, "NVDA", "2026-09", 1, output=lambda _: None)
+        paths = [path for path, _ in transport.calls]
+        search_index = paths.index("/iserver/secdef/search")
+        first_derivative_snapshot = next(
+            index for index, (path, params) in enumerate(transport.calls)
+            if path == "/iserver/marketdata/snapshot" and params.get("conids") != "4815747"
+        )
+        self.assertLess(search_index, paths.index("/iserver/secdef/strikes"))
+        self.assertLess(search_index, paths.index("/iserver/secdef/info"))
+        self.assertLess(search_index, first_derivative_snapshot)
 
     def test_unauthenticated_session_has_specific_error(self):
         provider = IbkrMarketDataProvider(FakeTransport(authenticated=False))

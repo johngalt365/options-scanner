@@ -54,6 +54,25 @@ class MarketDataFieldStatus(StrEnum):
     PARTIAL_RESPONSE = "respuesta_parcial"
 
 
+@dataclass(frozen=True, slots=True)
+class MarketDataAvailability:
+    """Interpretación conservadora del field 6509 de IBKR."""
+
+    raw: str | None
+    feed: str
+    incomplete: bool
+    book: bool
+
+    @property
+    def display(self) -> str:
+        details = [self.feed]
+        if self.incomplete:
+            details.append("incomplete")
+        details.append("book disponible" if self.book else "book no indicado")
+        raw = self.raw if self.raw is not None else "ausente"
+        return f"{raw} ({', '.join(details)})"
+
+
 class IbkrTransport(Protocol):
     """Frontera HTTP mínima, fácil de reemplazar por un fake en tests."""
 
@@ -102,13 +121,14 @@ class IbkrOptionQuote:
     theta: float | None
     implied_volatility: float | None
     open_interest: int | None
+    market_data_availability: MarketDataAvailability
     field_statuses: Mapping[str, MarketDataFieldStatus]
 
 
 class IbkrMarketDataProvider:
     """Proveedor del scanner y operaciones de descubrimiento para el diagnóstico."""
 
-    # Client Portal market-data field IDs. 7698 is *Option Open Interest*;
+    # Client Portal market-data field IDs. 7638 is *Option Open Interest*;
     # 7087/7088 are aggregate put/call OI for an underlying, not a contract.
     UNDERLYING_SNAPSHOT_FIELDS = "31,84,86"
     OPTION_FIELD_IDS = {
@@ -117,9 +137,10 @@ class IbkrMarketDataProvider:
         "delta": "7308",
         "theta": "7310",
         "implied_volatility": "7633",
-        "open_interest": "7698",
+        "open_interest": "7638",
     }
-    OPTION_SNAPSHOT_FIELDS = ",".join(OPTION_FIELD_IDS.values())
+    MARKET_DATA_AVAILABILITY_FIELD = "6509"
+    OPTION_SNAPSHOT_FIELDS = ",".join((*OPTION_FIELD_IDS.values(), MARKET_DATA_AVAILABILITY_FIELD))
     # Kept as a compatibility alias for callers/tests written before fields
     # were split by instrument type.
     SNAPSHOT_FIELDS = UNDERLYING_SNAPSHOT_FIELDS
@@ -134,6 +155,7 @@ class IbkrMarketDataProvider:
         self._transport = transport
         self._snapshot_attempts = max(1, snapshot_attempts)
         self._snapshot_retry_delay = max(0.0, snapshot_retry_delay)
+        self._searched_underlyings: set[str] = set()
 
     def require_authenticated_session(self) -> None:
         data = self._transport.get("/iserver/auth/status", {})
@@ -146,6 +168,7 @@ class IbkrMarketDataProvider:
         row = next((item for item in rows if isinstance(item, Mapping) and str(item.get("symbol", "")).upper() == symbol.upper()), None)
         if row is None or row.get("conid") is None:
             raise TickerNotFoundError(f"ticker no encontrado: {symbol.upper()}")
+        self._searched_underlyings.add(str(row["conid"]))
         months = ""
         for section in row.get("sections", ()):
             if isinstance(section, Mapping) and section.get("secType") == "OPT":
@@ -181,6 +204,7 @@ class IbkrMarketDataProvider:
         return Underlying(symbol.upper(), price)
 
     def get_put_strikes(self, conid: str, expiration: date) -> tuple[float, ...]:
+        self._require_derivative_search(conid)
         data = self._transport.get("/iserver/secdef/strikes", {
             "conid": conid, "secType": "OPT", "month": _format_ibkr_month(expiration), "exchange": "SMART",
         })
@@ -191,6 +215,7 @@ class IbkrMarketDataProvider:
         return strikes
 
     def get_put_contracts(self, conid: str, expiration: date, strikes: Sequence[float]) -> tuple[tuple[str, float], ...]:
+        self._require_derivative_search(conid)
         contracts: list[tuple[str, float]] = []
         for strike in strikes:
             data = self._transport.get("/iserver/secdef/info", {
@@ -229,10 +254,18 @@ class IbkrMarketDataProvider:
             quotes.append(IbkrOptionQuote(
                 conid, strike, expiration, _number(row, "84", "bid"), _number(row, "86", "ask"),
                 _number(row, "7308", "delta"), _number(row, "7310", "theta"),
-                _number(row, "7633", "iv"), _integer(row, "7698", "open_interest"),
+                _number(row, "7633", "iv"), _integer(row, "7638", "open_interest"),
+                _market_data_availability(row.get(self.MARKET_DATA_AVAILABILITY_FIELD)),
                 statuses,
             ))
         return tuple(quotes)
+
+    def _require_derivative_search(self, conid: str) -> None:
+        if str(conid) not in self._searched_underlyings:
+            raise IncompleteDataError(
+                "antes de resolver o solicitar datos de derivados debe llamarse a "
+                "/iserver/secdef/search para el subyacente"
+            )
 
     def _snapshot(
         self,
@@ -381,7 +414,7 @@ def _is_explicitly_unavailable(value: Any) -> bool:
 def _safe_snapshot_summary(row: Mapping[str, Any]) -> str:
     """Expose solo identificadores/campos solicitados, nunca la respuesta HTTP."""
 
-    allowed = {"conid", "conidEx", "error", "message", "84", "86", "7308", "7310", "7633", "7698", "31"}
+    allowed = {"conid", "conidEx", "error", "message", "84", "86", "7308", "7310", "7633", "7638", "6509", "31"}
     parts = []
     for key in sorted((str(key) for key in row if str(key) in allowed)):
         if key in {"error", "message"}:
@@ -398,3 +431,18 @@ def _safe_snapshot_summary(row: Mapping[str, Any]) -> str:
 def _has_permission_message(message: str) -> bool:
     lowered = message.lower()
     return any(word in lowered for word in ("not subscribed", "permission", "market data subscription", "unauthorized"))
+
+
+def _market_data_availability(value: Any) -> MarketDataAvailability:
+    """Decode documented 6509 flags without guessing from missing quote fields."""
+
+    raw = None if value is None else str(value).strip()
+    first = raw[:1] if raw else ""
+    feed = {
+        "R": "RealTime",
+        "D": "Delayed",
+        "Z": "Frozen",
+        "Y": "Frozen-Delayed",
+        "N": "Not Subscribed",
+    }.get(first, "no indicado")
+    return MarketDataAvailability(raw or None, feed, bool(raw and "i" in raw), bool(raw and "B" in raw))
