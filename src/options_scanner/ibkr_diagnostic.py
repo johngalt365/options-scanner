@@ -16,6 +16,11 @@ from options_scanner.ibkr import (
     _is_explicitly_unavailable,
     _market_data_availability,
 )
+from options_scanner.ibkr_websocket import (
+    ClientPortalWebSocket,
+    compare_market_fields,
+    observe_smd_stream,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true", help="muestra el resumen seguro de cada respuesta snapshot")
     parser.add_argument("--deep", action="store_true", help="diagnóstico profundo de un único contrato PUT")
     parser.add_argument("--strike", type=float, help="strike PUT exacto (obligatorio con --deep)")
+    parser.add_argument("--maturity", help="vencimiento exacto YYYY-MM-DD del PUT (recomendado si el mes tiene varios)")
+    parser.add_argument("--websocket", action="store_true", help="compara el snapshot con el stream oficial smd")
+    parser.add_argument("--stream-seconds", type=float, default=7.0, help="duración del stream smd (5–10 s recomendado)")
     return parser
 
 
@@ -57,7 +65,17 @@ def run(provider: IbkrMarketDataProvider, symbol: str, expiration: str | None, l
         output(" | ".join(_display(value, status) for value, status in values))
 
 
-def run_deep(provider: IbkrMarketDataProvider, symbol: str, expiration: str | None, strike: float, *, output=print) -> None:
+def run_deep(
+    provider: IbkrMarketDataProvider,
+    symbol: str,
+    expiration: str | None,
+    strike: float,
+    *,
+    maturity: str | None = None,
+    websocket_factory=None,
+    stream_seconds: float = 7.0,
+    output=print,
+) -> None:
     """Diagnostica exactamente un PUT y muestra solo fields de market data."""
 
     provider.require_authenticated_session()
@@ -67,12 +85,40 @@ def run_deep(provider: IbkrMarketDataProvider, symbol: str, expiration: str | No
     matching = next((value for value in available if value == strike), None)
     if matching is None:
         raise ValueError(f"el strike PUT {strike:g} no está disponible para {selected:%Y-%m}")
-    contracts = provider.get_put_contracts(underlying_conid, selected, (matching,))
-    contract_conid, actual_strike = contracts[0]
-    output(f"Contrato PUT: conid={contract_conid} vencimiento={selected:%Y-%m} strike={actual_strike:g}")
+    exact_maturity = _parse_maturity(maturity)
+    contract = provider.confirm_put_contract(
+        underlying_conid, symbol, selected, matching, exact_maturity=exact_maturity
+    )
+    contract_conid = contract.conid
+    output(
+        "Contrato PUT confirmado: "
+        f"conid={contract.conid} symbol={contract.symbol} secType={contract.sec_type} "
+        f"exchange={contract.exchange} listingExchange={contract.listing_exchange} "
+        f"right={contract.right} strike={contract.strike:g} maturityDate={contract.maturity_date} "
+        f"multiplier={contract.multiplier} tradingClass={contract.trading_class} "
+        f"validExchanges={contract.valid_exchanges}"
+    )
     output(f"Fields solicitados: {provider.DEEP_OPTION_SNAPSHOT_FIELDS}")
-    for observation in provider.diagnose_put_contract(underlying_conid, contract_conid):
+    snapshots = provider.diagnose_put_contract(underlying_conid, contract_conid)
+    for observation in snapshots:
         output(_display_deep_attempt(observation))
+    if websocket_factory is not None:
+        stream = observe_smd_stream(websocket_factory(), contract_conid, stream_seconds)
+        for observation in stream:
+            values = " | ".join(f"{field}={value}" for field, value in observation.fields.items())
+            output(f"WebSocket +{observation.elapsed_seconds:.3f}s: {values}")
+        comparison = compare_market_fields(snapshots, stream)
+        output("Comparación fields: " + " | ".join(f"{name}={','.join(fields) or '-'}" for name, fields in comparison.items()))
+
+
+def _parse_maturity(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("--maturity debe tener formato YYYY-MM-DD") from exc
+    return parsed.strftime("%Y%m%d")
 
 
 def _display_deep_attempt(observation: DeepSnapshotAttempt) -> str:
@@ -120,12 +166,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.deep and args.strike is None:
         print("ERROR: --strike es obligatorio con --deep", file=sys.stderr)
         return 2
+    if args.websocket and not args.deep:
+        print("ERROR: --websocket requiere --deep", file=sys.stderr)
+        return 2
+    if not 0 < args.stream_seconds <= 60:
+        print("ERROR: --stream-seconds debe estar entre 0 y 60", file=sys.stderr)
+        return 2
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
     provider = IbkrMarketDataProvider(ClientPortalTransport(args.base_url, allow_insecure_tls=args.insecure_tls))
     try:
         if args.deep:
-            run_deep(provider, args.symbol, args.expiration, args.strike)
+            websocket_factory = None
+            if args.websocket:
+                websocket_factory = lambda: ClientPortalWebSocket(
+                    args.base_url, allow_insecure_tls=args.insecure_tls
+                )
+            run_deep(
+                provider, args.symbol, args.expiration, args.strike,
+                maturity=args.maturity, websocket_factory=websocket_factory,
+                stream_seconds=args.stream_seconds,
+            )
         else:
             run(provider, args.symbol, args.expiration, args.contracts)
     except (IbkrError, ValueError) as exc:

@@ -5,6 +5,7 @@ from urllib.error import URLError
 
 from options_scanner.ibkr import (
     ClientPortalTransport,
+    ContractMismatchError,
     GatewayUnavailableError,
     IbkrMarketDataProvider,
     IncompleteDataError,
@@ -14,6 +15,12 @@ from options_scanner.ibkr import (
     TickerNotFoundError,
 )
 from options_scanner.ibkr_diagnostic import _display_deep_attempt, main, run
+from options_scanner.ibkr_websocket import (
+    StreamObservation,
+    compare_market_fields,
+    observe_smd_stream,
+    parse_smd_message,
+)
 
 
 class FakeTransport:
@@ -42,6 +49,75 @@ class FakeTransport:
 
 
 class DiagnosticTest(TestCase):
+    def test_contract_is_confirmed_by_secdef_info_before_snapshot(self):
+        class ContractTransport(FakeTransport):
+            def get(self, path, params):
+                if path.endswith("secdef/info"):
+                    self.calls.append((path, params))
+                    return [{
+                        "conid": 999, "symbol": "NVDA", "secType": "OPT", "exchange": "SMART",
+                        "listingExchange": "NASDAQ", "right": "P", "strike": 100,
+                        "maturityDate": "20260918", "multiplier": "100", "tradingClass": "NVDA",
+                        "validExchanges": "SMART,CBOE", "cookie": "must-not-be-copied",
+                    }]
+                return super().get(path, params)
+
+        transport = ContractTransport()
+        provider = IbkrMarketDataProvider(transport)
+        provider.locate_stock("NVDA")
+        contract = provider.confirm_put_contract(
+            "4815747", "NVDA", __import__("datetime").date(2026, 9, 1), 100, exact_maturity="20260918"
+        )
+        self.assertEqual((contract.conid, contract.right, contract.maturity_date), ("999", "P", "20260918"))
+        self.assertFalse(hasattr(contract, "cookie"))
+
+    def test_contract_confirmation_rejects_right_strike_and_expiry_mismatches(self):
+        for changed in (
+            {"right": "C"}, {"strike": 101}, {"maturityDate": "20261016"}
+        ):
+            class ContractTransport(FakeTransport):
+                def get(self, path, params):
+                    if path.endswith("secdef/info"):
+                        row = {"conid": 999, "symbol": "NVDA", "secType": "OPT", "right": "P", "strike": 100, "maturityDate": "20260918"}
+                        row.update(changed)
+                        return [row]
+                    return super().get(path, params)
+            provider = IbkrMarketDataProvider(ContractTransport())
+            provider.locate_stock("NVDA")
+            with self.subTest(changed=changed), self.assertRaises(ContractMismatchError):
+                provider.confirm_put_contract("4815747", "NVDA", __import__("datetime").date(2026, 9, 1), 100, exact_maturity="20260918")
+
+    def test_websocket_parser_keeps_only_safe_fields_for_selected_conid(self):
+        message = '{"topic":"smd+999","84":"1.1","86":1.2,"cookie":"secret","31":{"unsafe":true}}'
+        self.assertEqual(parse_smd_message(message, "999"), {"84": "1.1", "86": 1.2, "31": "valor no escalar omitido"})
+        self.assertEqual(parse_smd_message('{"topic":"smd+998","84":1}', "999"), {})
+        self.assertEqual(parse_smd_message("not json", "999"), {})
+
+    def test_websocket_stream_preserves_temporal_evolution_and_unsubscribes(self):
+        class FakeSocket:
+            def __init__(self):
+                self.messages = iter(('{"topic":"system","84":"ignore"}', '{"topic":"smd+999","84":"1.1"}', '{"topic":"smd+999","86":"1.2","7633":"0.3"}', None))
+                self.sent = []
+                self.closed = False
+            def send_text(self, value): self.sent.append(value)
+            def receive_text(self, timeout): return next(self.messages)
+            def close(self): self.closed = True
+        ticks = iter((0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6))
+        connection = FakeSocket()
+        observations = observe_smd_stream(connection, "999", 5, clock=lambda: next(ticks))
+        self.assertEqual([item.fields for item in observations], [{"84": "1.1"}, {"86": "1.2", "7633": "0.3"}])
+        self.assertLess(observations[0].elapsed_seconds, observations[1].elapsed_seconds)
+        self.assertTrue(connection.sent[0].startswith("smd+999+"))
+        self.assertEqual(connection.sent[-1], "umd+999+{}")
+        self.assertTrue(connection.closed)
+
+    def test_snapshot_and_websocket_field_comparison(self):
+        snapshot = (__import__("options_scanner.ibkr", fromlist=["DeepSnapshotAttempt"]).DeepSnapshotAttempt("snapshot", 1, {"6509": "RpBd", "7638": "10"}),)
+        stream = (StreamObservation(0.2, {"6509": "RpBd", "84": "1.1", "86": "1.2", "7633": "0.3"}),)
+        compared = compare_market_fields(snapshot, stream)
+        self.assertEqual(compared["websocket_only"], ("84", "86", "7633"))
+        self.assertEqual(compared["snapshot_only"], ("7638",))
+
     def test_deep_snapshot_preserves_preflight_partial_and_later_fields(self):
         class TemporalTransport:
             def __init__(self):

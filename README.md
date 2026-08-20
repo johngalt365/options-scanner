@@ -114,17 +114,26 @@ credenciales. El proyecto y sus tests nunca necesitan hacer una llamada real:
 ### Diagnóstico profundo de un solo contrato
 
 Para observar la evolución temporal de **un único PUT** sin cambiar el scanner
-ni sus suscripciones, indica mes y strike exactos. El modo ejecuta primero
-`/iserver/secdef/search`, resuelve ese contrato, hace el pre-flight y realiza
-cinco snapshots adicionales con esperas crecientes (0,25; 0,5; 1; 2 y 3 s):
+ni sus suscripciones, indica mes, strike y, si el mes contiene varios
+vencimientos, el día exacto. El modo ejecuta primero `/iserver/secdef/search`,
+consulta `/iserver/secdef/strikes` y exige que `/iserver/secdef/info` confirme
+el símbolo, tipo, right PUT, strike y vencimiento antes de usar el conid en
+market data. Si hay varios contratos compatibles y no se da el día exacto, el
+diagnóstico rechaza la ambigüedad en vez de escoger uno. Después hace el
+pre-flight y cinco snapshots adicionales con esperas crecientes (0,25; 0,5; 1;
+2 y 3 s):
 
 ```bash
 PYTHONPATH=src python -m options_scanner.ibkr_diagnostic \
-  --deep --symbol NVDA --expiration 2026-09 --strike 100 --insecure-tls
+  --deep --symbol NVDA --expiration 2026-09 --maturity 2026-09-18 \
+  --strike 100 --insecure-tls
 ```
 
-La salida identifica el conid, vencimiento y strike, y para cada entrega
-muestra exclusivamente los fields `31,84,86,6509,7308,7310,7633,7638`. Indica
+La salida de confirmación contiene únicamente los atributos seguros `conid`,
+`symbol`, `secType`, `exchange`, `listingExchange`, `right`, `strike`,
+`maturityDate`, `multiplier`, `tradingClass` y `validExchanges`. Para cada
+entrega muestra exclusivamente los fields
+`31,84,86,6509,7308,7309,7310,7311,7633,7635,7638`. Indica
 por separado `field no recibido` y `field recibido con valor N/A`, por lo que se
 puede comprobar si bid (`84`), ask (`86`) o IV (`7633`) aparecen más tarde. El
 valor `6509` se interpreta conservadoramente: `RpBd` significa `RealTime` y
@@ -133,6 +142,29 @@ suscripción. Delta y theta se muestran como valores crudos de diagnóstico, no
 como datos fiables para decidir. No se imprimen respuestas arbitrarias,
 cookies, cabeceras o credenciales, y este modo no contiene operaciones de
 órdenes.
+
+Opcionalmente, `--websocket` abre durante unos segundos el WebSocket del mismo
+Client Portal Gateway y envía la suscripción oficial `smd` **solo para ese
+conid**. Solicita exactamente la misma lista de fields, conserva su evolución
+temporal, envía `umd` al terminar y muestra las diferencias entre fields vistos
+en snapshot y WebSocket:
+
+```bash
+PYTHONPATH=src python -m options_scanner.ibkr_diagnostic \
+  --deep --websocket --stream-seconds 7 \
+  --symbol NVDA --expiration 2026-09 --maturity 2026-09-18 \
+  --strike 100 --insecure-tls
+```
+
+El parser del stream acepta solo el topic `smd` del conid seleccionado y los
+field IDs permitidos; descarta metadatos y cualquier otro topic. La salida no
+imprime el handshake, cookies, headers ni credenciales. Este contraste no crea
+suscripciones de mercado adicionales y no interpreta la ausencia de un field
+como falta de OPRA cuando `6509` comunica RealTime/book.
+
+Referencias oficiales revisadas para este flujo: [Client Portal Web API v1
+(Security Definition y Market Data)](https://ibkrcampus.com/campus/ibkr-api-page/cpapi-v1/)
+y [WebSocket de Client Portal API](https://ibkrcampus.com/campus/ibkr-api-page/cpapi-v1/#websocket).
 
 ## Evolución prevista
 

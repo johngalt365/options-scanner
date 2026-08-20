@@ -45,6 +45,10 @@ class IncompleteDataError(IbkrError):
     pass
 
 
+class ContractMismatchError(IbkrError):
+    """El contrato resuelto por IBKR no es el derivado solicitado."""
+
+
 class MarketDataFieldStatus(StrEnum):
     """Motivo por el que una celda de un snapshot no contiene un valor."""
 
@@ -134,6 +138,23 @@ class DeepSnapshotAttempt:
     fields: Mapping[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class ConfirmedOptionContract:
+    """Identidad segura de un contrato devuelto por ``secdef/info``."""
+
+    conid: str
+    symbol: str
+    sec_type: str
+    exchange: str
+    listing_exchange: str
+    right: str
+    strike: float
+    maturity_date: str
+    multiplier: str
+    trading_class: str
+    valid_exchanges: str
+
+
 class IbkrMarketDataProvider:
     """Proveedor del scanner y operaciones de descubrimiento para el diagnóstico."""
 
@@ -150,7 +171,7 @@ class IbkrMarketDataProvider:
     }
     MARKET_DATA_AVAILABILITY_FIELD = "6509"
     OPTION_SNAPSHOT_FIELDS = ",".join((*OPTION_FIELD_IDS.values(), MARKET_DATA_AVAILABILITY_FIELD))
-    DEEP_OPTION_SNAPSHOT_FIELDS = "31,84,86,6509,7308,7310,7633,7638"
+    DEEP_OPTION_SNAPSHOT_FIELDS = "31,84,86,6509,7308,7309,7310,7311,7633,7635,7638"
     # Kept as a compatibility alias for callers/tests written before fields
     # were split by instrument type.
     SNAPSHOT_FIELDS = UNDERLYING_SNAPSHOT_FIELDS
@@ -239,6 +260,46 @@ class IbkrMarketDataProvider:
         if not contracts:
             raise IncompleteDataError("IBKR no devolvió contratos PUT para los strikes seleccionados")
         return tuple(contracts)
+
+    def confirm_put_contract(
+        self,
+        underlying_conid: str,
+        symbol: str,
+        expiration: date,
+        strike: float,
+        *,
+        exact_maturity: str | None = None,
+    ) -> ConfirmedOptionContract:
+        """Resuelve y valida un PUT antes de usar su conid para market data.
+
+        ``expiration`` identifica el mes usado por ``secdef/strikes``. Cuando
+        se facilita ``exact_maturity`` (YYYYMMDD), también se exige ese día.
+        """
+
+        self._require_derivative_search(underlying_conid)
+        data = self._transport.get("/iserver/secdef/info", {
+            "conid": str(underlying_conid), "secType": "OPT",
+            "month": _format_ibkr_month(expiration), "exchange": "SMART",
+            "strike": str(strike), "right": "P",
+        })
+        rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else ()
+        candidates: list[ConfirmedOptionContract] = []
+        for row in rows:
+            if not isinstance(row, Mapping) or row.get("conid") is None:
+                continue
+            contract = _confirmed_option(row)
+            if _contract_matches(contract, symbol, expiration, strike, exact_maturity):
+                candidates.append(contract)
+        if not candidates:
+            raise ContractMismatchError(
+                "secdef/info no confirmó exactamente el PUT solicitado "
+                f"({symbol.upper()} strike={strike:g} vencimiento={exact_maturity or expiration.strftime('%Y-%m')})"
+            )
+        if len(candidates) > 1 and exact_maturity is None:
+            raise ContractMismatchError(
+                "secdef/info devolvió varios PUT compatibles en el mes; indica un vencimiento exacto YYYY-MM-DD"
+            )
+        return candidates[0]
 
     def get_put_quotes(self, contracts: Sequence[tuple[str, float]], expiration: date) -> tuple[IbkrOptionQuote, ...]:
         conids = tuple(conid for conid, _ in contracts)
@@ -423,6 +484,52 @@ def _parse_ibkr_month(value: str) -> date | None:
 
 def _format_ibkr_month(value: date) -> str:
     return f"{_MONTHS[value.month - 1]}{value.year % 100:02d}"
+
+
+def _confirmed_option(row: Mapping[str, Any]) -> ConfirmedOptionContract:
+    """Copy only documented, non-session contract attributes."""
+
+    maturity = row.get("maturityDate", row.get("maturity", row.get("expiration", "")))
+    try:
+        strike = float(row.get("strike", "nan"))
+    except (TypeError, ValueError):
+        strike = float("nan")
+    return ConfirmedOptionContract(
+        conid=str(row["conid"]),
+        symbol=str(row.get("symbol", "")),
+        sec_type=str(row.get("secType", "")),
+        exchange=str(row.get("exchange", "")),
+        listing_exchange=str(row.get("listingExchange", "")),
+        right=str(row.get("right", "")),
+        strike=strike,
+        maturity_date=re.sub(r"[^0-9]", "", str(maturity)),
+        multiplier=str(row.get("multiplier", "")),
+        trading_class=str(row.get("tradingClass", "")),
+        valid_exchanges=str(row.get("validExchanges", "")),
+    )
+
+
+def _contract_matches(
+    contract: ConfirmedOptionContract,
+    symbol: str,
+    expiration: date,
+    strike: float,
+    exact_maturity: str | None,
+) -> bool:
+    expected_month = expiration.strftime("%Y%m")
+    expected_maturity = re.sub(r"[^0-9]", "", exact_maturity or "")
+    maturity_matches = (
+        contract.maturity_date == expected_maturity
+        if expected_maturity
+        else contract.maturity_date.startswith(expected_month)
+    )
+    return (
+        contract.symbol.upper() == symbol.upper()
+        and contract.sec_type.upper() in {"OPT", "OPTION"}
+        and contract.right.upper() in {"P", "PUT"}
+        and abs(contract.strike - strike) < 1e-9
+        and maturity_matches
+    )
 
 
 def _number(row: Mapping[str, Any], *keys: str) -> float | None:
