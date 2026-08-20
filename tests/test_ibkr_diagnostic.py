@@ -41,6 +41,57 @@ class FakeTransport:
 
 
 class DiagnosticTest(TestCase):
+    def test_underlying_snapshot_repeats_after_conid_only_preflight(self):
+        class PreflightTransport:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, path, params):
+                self.calls.append((path, params))
+                return [{"conid": 4815747}] if len(self.calls) == 1 else [{"conid": 4815747, "31": "101.25"}]
+
+        transport = PreflightTransport()
+        underlying = IbkrMarketDataProvider(transport, snapshot_retry_delay=0).get_underlying_by_conid("NVDA", "4815747")
+
+        self.assertEqual(underlying.current_price, 101.25)
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(transport.calls[0][1]["fields"], IbkrMarketDataProvider.SNAPSHOT_FIELDS)
+        self.assertEqual(transport.calls[1][1], transport.calls[0][1])
+
+    def test_underlying_uses_bid_ask_mid_when_last_is_absent(self):
+        class BidAskTransport:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, path, params):
+                self.calls += 1
+                return [{"conid": 4815747}] if self.calls == 1 else [
+                    {"conid": 4815747, "84": "100.00", "86": "102.00"}
+                ]
+
+        provider = IbkrMarketDataProvider(BidAskTransport(), snapshot_retry_delay=0)
+        with self.assertLogs("options_scanner.ibkr", level="WARNING") as logs:
+            underlying = provider.get_underlying_by_conid("NVDA", "4815747")
+
+        self.assertEqual(underlying.current_price, 101.0)
+        self.assertIn("se usa el mid", logs.output[0])
+
+    def test_underlying_fails_after_retries_when_no_price_is_available(self):
+        class NoPriceTransport:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, path, params):
+                self.calls += 1
+                return [{"conid": 4815747}]
+
+        transport = NoPriceTransport()
+        provider = IbkrMarketDataProvider(transport, snapshot_attempts=3, snapshot_retry_delay=0)
+
+        with self.assertRaisesRegex(IncompleteDataError, "precio del subyacente"):
+            provider.get_underlying_by_conid("NVDA", "4815747")
+        self.assertEqual(transport.calls, 4)  # pre-flight + tres intentos de datos
+
     def test_complete_workflow_uses_provider_and_prints_quotes(self):
         transport = FakeTransport()
         lines = []
