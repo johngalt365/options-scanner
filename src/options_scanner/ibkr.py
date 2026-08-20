@@ -267,6 +267,34 @@ class IbkrMarketDataProvider:
             raise IncompleteDataError("IBKR no devolvió contratos PUT para los strikes seleccionados")
         return tuple(contracts)
 
+    def discover_put_contracts(
+        self, conid: str, month: date, strikes: Sequence[float], *, symbol: str
+    ) -> tuple[ConfirmedOptionContract, ...]:
+        """Descubre vencimientos exactos y conserva solo identidades PUT válidas."""
+        self._require_derivative_search(conid)
+        confirmed: dict[str, ConfirmedOptionContract] = {}
+        for strike in strikes:
+            data = self._transport.get("/iserver/secdef/info", {
+                "conid": conid, "secType": "OPT", "month": _format_ibkr_month(month),
+                "exchange": "SMART", "strike": str(strike), "right": "P",
+            })
+            rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else ()
+            for row in rows:
+                if not isinstance(row, Mapping) or row.get("conid") is None:
+                    continue
+                candidate = _confirmed_option(row)
+                exact = _parse_maturity_date(candidate.maturity_date)
+                if exact is not None and _contract_matches(candidate, symbol, month, strike, candidate.maturity_date):
+                    confirmed[candidate.conid] = candidate
+        return tuple(confirmed.values())
+
+    @staticmethod
+    def contract_expiration(contract: ConfirmedOptionContract) -> date:
+        expiration = _parse_maturity_date(contract.maturity_date)
+        if expiration is None:
+            raise ContractMismatchError("el contrato confirmado no contiene maturityDate válido")
+        return expiration
+
     def confirm_put_contract(
         self,
         underlying_conid: str,
@@ -469,21 +497,9 @@ class IbkrMarketDataProvider:
         underlying_conid, months = self.locate_stock(symbol)
         confirmed: dict[str, ConfirmedOptionContract] = {}
         for month in months:
-            for strike in self.get_put_strikes(underlying_conid, month):
-                data = self._transport.get("/iserver/secdef/info", {
-                    "conid": underlying_conid, "secType": "OPT", "month": _format_ibkr_month(month),
-                    "exchange": "SMART", "strike": str(strike), "right": "P",
-                })
-                rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else ()
-                for row in rows:
-                    if not isinstance(row, Mapping) or row.get("conid") is None:
-                        continue
-                    candidate = _confirmed_option(row)
-                    exact = _parse_maturity_date(candidate.maturity_date)
-                    # Mismatches are deliberately ignored and never enter the
-                    # set subsequently sent to marketdata/snapshot.
-                    if exact is not None and _contract_matches(candidate, symbol, month, strike, candidate.maturity_date):
-                        confirmed[candidate.conid] = candidate
+            strikes = self.get_put_strikes(underlying_conid, month)
+            for candidate in self.discover_put_contracts(underlying_conid, month, strikes, symbol=symbol):
+                confirmed[candidate.conid] = candidate
 
         if not confirmed:
             raise IncompleteDataError("secdef/info no confirmó ningún contrato PUT con vencimiento exacto")

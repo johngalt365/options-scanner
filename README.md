@@ -59,6 +59,33 @@ python -m options_scanner.example
 python -m unittest discover -s tests -v
 ```
 
+## Scanner real de venta de PUTs
+
+El primer scanner ejecutable está limitado por defecto a NVDA, es de **solo
+lectura** y no contiene ninguna operación de órdenes. Obtiene el subyacente,
+descubre los vencimientos exactos confirmados por `secdef/info`, limita DTE y
+margen antes de pedir snapshots y filtra finalmente por delta absoluta:
+
+```bash
+PYTHONPATH=src python -m options_scanner.scan_puts \
+  --ticker NVDA --min-dte 30 --max-dte 45 \
+  --min-safety-margin 0.20 --min-abs-delta 0.15 \
+  --max-abs-delta 0.30 --insecure
+```
+
+La tabla muestra vencimiento, DTE, strike, subyacente, margen, bid/ask/mid,
+griegas, IV, open interest, el estado 6509, `premium_yield` (prima mid / capital
+`strike × 100`) y su anualización. El ranking se ordena por rentabilidad
+anualizada descendente. Si falta bid, ask o delta, el contrato aparece como
+incompleto en una tabla separada y nunca se inventa un mid. IV, theta y open
+interest se presentan pero no son filtros.
+
+Para probar exactamente el mismo comando sin Gateway ni datos reales:
+
+```bash
+PYTHONPATH=src python -m options_scanner.scan_puts --ticker NVDA --fake
+```
+
 ## Diagnóstico local de IBKR
 
 El diagnóstico es de **solo lectura** y no envía órdenes. Antes de ejecutarlo,

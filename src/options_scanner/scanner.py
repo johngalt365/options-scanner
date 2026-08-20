@@ -1,10 +1,70 @@
-"""Servicio de aplicación que orquesta un proveedor mediante su puerto."""
+"""Servicio de aplicación y resultados del scanner de venta de PUTs."""
 
+from dataclasses import dataclass
 from datetime import date
+from typing import Iterable
 
-from options_scanner.filters import filter_put_candidates
+from options_scanner.filters import filter_put_candidates, safety_margin
 from options_scanner.market_data import MarketDataProvider
 from options_scanner.models import MarketData
+
+
+@dataclass(frozen=True, slots=True)
+class PutScanCandidate:
+    ticker: str
+    expiration: date
+    dte: int
+    strike: float
+    underlying_price: float
+    safety_margin: float
+    bid: float | None
+    ask: float | None
+    delta: float | None
+    gamma: float | None
+    theta: float | None
+    vega: float | None
+    implied_volatility: float | None
+    open_interest: int | None
+    market_data_availability: str | None
+
+    @property
+    def mid(self) -> float | None:
+        return None if self.bid is None or self.ask is None else (self.bid + self.ask) / 2
+
+    @property
+    def premium_yield(self) -> float | None:
+        return None if self.mid is None else self.mid / self.strike
+
+    @property
+    def annualized_premium_yield(self) -> float | None:
+        value = self.premium_yield
+        return None if value is None or self.dte <= 0 else value * 365 / self.dte
+
+    @property
+    def complete(self) -> bool:
+        """Los campos necesarios para filtrar y clasificar están presentes."""
+        return self.mid is not None and self.delta is not None
+
+
+def build_candidates(underlying_price: float, quotes: Iterable[MarketData], as_of: date) -> list[PutScanCandidate]:
+    return [
+        PutScanCandidate(
+            q.contract.underlying_symbol, q.contract.expiration, q.contract.days_to_expiration(as_of),
+            q.contract.strike, underlying_price, safety_margin(underlying_price, q.contract.strike),
+            q.bid, q.ask, q.delta, q.gamma, q.theta, q.vega, q.implied_volatility,
+            q.open_interest, q.market_data_availability,
+        )
+        for q in quotes
+    ]
+
+
+def rank_candidates(candidates: Iterable[PutScanCandidate]) -> list[PutScanCandidate]:
+    """Excluye incompletos y ordena por rentabilidad anualizada descendente."""
+    return sorted(
+        (candidate for candidate in candidates if candidate.complete),
+        key=lambda candidate: candidate.annualized_premium_yield or 0.0,
+        reverse=True,
+    )
 
 
 def scan_puts(provider: MarketDataProvider, symbol: str, as_of: date, **filters: float | int) -> list[MarketData]:
