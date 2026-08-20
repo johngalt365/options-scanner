@@ -7,7 +7,9 @@ opciones financieras. Esta primera fase **no** se conecta a Interactive Brokers
 ## Objetivo del MVP
 
 El MVP identifica contratos que podrían encajar en una estrategia de venta de
-PUT con intención de adquirir las acciones en caso de asignación. Su alcance es:
+PUT con intención de adquirir las acciones en caso de asignación. DTE, margen
+de seguridad y delta son parámetros configurables; los valores por defecto de
+esta primera versión son:
 
 - subyacente: **NVDA**;
 - tipo de opción: **PUT**;
@@ -15,6 +17,10 @@ PUT con intención de adquirir las acciones en caso de asignación. Su alcance e
 - margen de seguridad: al menos **20 %** respecto al precio actual, calculado
   como `(precio_actual - strike) / precio_actual`;
 - delta: valor absoluto entre **0,15 y 0,30**, ambos inclusive.
+
+La delta de una PUT puede ser negativa. Por ese motivo, el filtro no compara
+su signo, sino su valor absoluto (`|delta|`): por ejemplo, una delta de `-0,20`
+se evalúa como `0,20` y queda dentro del intervalo configurado por defecto.
 
 Los datos son ficticios y sirven únicamente para demostrar y probar las reglas;
 no constituyen datos de mercado ni una recomendación de inversión.
@@ -74,7 +80,9 @@ python -m unittest discover -s tests -v
 
 En iteraciones posteriores se podrán incorporar, de forma incremental:
 
-1. un puerto de datos de mercado y un adaptador real para IBKR;
+1. un puerto de datos de mercado y un adaptador real para IBKR cuya primera
+   integración será exclusivamente de lectura, destinada a consultar market
+   data y cadenas de opciones, sin envío de órdenes;
 2. métricas de theta, volatilidad implícita, liquidez, bid/ask, open interest y
    rentabilidad de la prima;
 3. un sistema de scoring configurable;
