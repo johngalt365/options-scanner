@@ -94,6 +94,15 @@ Siguiendo el prerrequisito de Client Portal Web API para derivados, el flujo
 llama primero a `/iserver/secdef/search` para el subyacente; solo después
 consulta strikes, resuelve los contratos y solicita sus snapshots.
 
+La identidad de una opción no queda determinada por un mes ni por un `conid`
+devuelto durante una resolución mensual. El flujo productivo conserva
+vencimientos exactos `YYYY-MM-DD` y, para cada strike, acepta un `conid` solo
+después de que `/iserver/secdef/info` confirme exactamente `symbol`,
+`secType=OPT`, `right=P`, `strike` y `maturityDate`. Los candidatos discordantes
+se descartan sin mezclarlos con los válidos y únicamente entonces se solicita
+`/iserver/marketdata/snapshot`. Los valores Frozen (`Z`) y Frozen-Delayed (`Y`)
+de `6509` se conservan en el modelo; no se rechazan automáticamente.
+
 Que una respuesta incluya `31` (last), `7308` (delta) y `7310` (theta), pero no
 bid/ask, IV u open interest, no prueba por sí solo un problema con OPRA: Client
 Portal entrega el snapshot de forma asíncrona y cada field puede estar ausente.

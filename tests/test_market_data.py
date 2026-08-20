@@ -13,11 +13,20 @@ class FakeProviderScannerTest(TestCase):
         self.assertEqual([q.contract.strike for q in result], [75.0, 80.0])
 
 class StubTransport:
-    def __init__(self): self.calls = []
+    def __init__(self): self.calls = []; self.snapshots = {}
     def get(self, path, params):
         self.calls.append((path, params))
-        if "snapshot" in path: return {"last": "100.50"}
-        return {"options": [{"conid": 987, "right": "P", "strike": "80", "expiration": "2026-09-24", "bid": "1.75", "ask": "1.90", "delta": "-0.25", "gamma": "0.016", "theta": "-0.05", "vega": "0.09", "iv": "0.35", "volume": "310", "open_interest": "1750"}]}
+        if path.endswith("secdef/search"):
+            return [{"symbol": "NVDA", "conid": 1, "sections": [{"secType": "OPT", "months": "SEP26"}]}]
+        if path.endswith("secdef/strikes"): return {"put": [80]}
+        if path.endswith("secdef/info"):
+            return [{"conid": 987, "symbol": "NVDA", "secType": "OPT", "right": "P", "strike": 80, "maturityDate": "20260924"}]
+        conids = params["conids"]
+        self.snapshots[conids] = self.snapshots.get(conids, 0) + 1
+        if self.snapshots[conids] == 1: return [{"conid": int(conids)}]
+        if conids == "1": return [{"conid": 1, "31": "100.50"}]
+        conid = int(params["conids"])
+        return [{"conid": conid, "84": "1.75", "86": "1.90", "7308": "-0.25", "7309": "0.016", "7310": "-0.05", "7311": "0.09", "7633": "0.35", "7638": "1750", "6509": "ZBd"}]
 
 class IbkrMappingTest(TestCase):
     def test_maps_transport_payload_to_internal_immutable_models(self):
@@ -26,5 +35,25 @@ class IbkrMappingTest(TestCase):
         self.assertEqual((underlying.symbol, underlying.current_price), ("NVDA", 100.5))
         self.assertEqual((quote.contract.id, quote.contract.option_type), ("987", OptionType.PUT))
         self.assertEqual((quote.bid, quote.ask, quote.delta, quote.implied_volatility), (1.75, 1.9, -0.25, 0.35))
-        self.assertEqual((quote.volume, quote.open_interest), (310, 1750))
-        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual((quote.gamma, quote.theta, quote.vega), (0.016, -0.05, 0.09))
+        self.assertEqual((quote.volume, quote.open_interest), (0, 1750))
+        self.assertEqual(quote.market_data_availability, "ZBd")
+
+    def test_ambiguous_month_uses_only_exactly_confirmed_contracts(self):
+        class AmbiguousTransport(StubTransport):
+            def get(self, path, params):
+                if path.endswith("secdef/info"):
+                    self.calls.append((path, params))
+                    return [
+                        {"conid": 111, "symbol": "NVDA", "secType": "OPT", "right": "C", "strike": 80, "maturityDate": "20260924"},
+                        {"conid": 112, "symbol": "NVDA", "secType": "OPT", "right": "P", "strike": 81, "maturityDate": "20260924"},
+                        {"conid": 222, "symbol": "NVDA", "secType": "OPT", "right": "P", "strike": 80, "maturityDate": "20260924"},
+                        {"conid": 333, "symbol": "NVDA", "secType": "OPT", "right": "P", "strike": 80, "maturityDate": "20261001"},
+                    ]
+                return super().get(path, params)
+
+        transport = AmbiguousTransport()
+        quote = IbkrMarketDataProvider(transport, snapshot_retry_delay=0).get_option_market_data("NVDA")[0]
+        snapshot_calls = [params for path, params in transport.calls if path.endswith("marketdata/snapshot")]
+        self.assertTrue(all(params["conids"] == "222" for params in snapshot_calls))
+        self.assertEqual((quote.contract.id, quote.contract.expiration), ("222", date(2026, 9, 24)))

@@ -122,7 +122,9 @@ class IbkrOptionQuote:
     bid: float | None
     ask: float | None
     delta: float | None
+    gamma: float | None
     theta: float | None
+    vega: float | None
     implied_volatility: float | None
     open_interest: int | None
     market_data_availability: MarketDataAvailability
@@ -165,7 +167,9 @@ class IbkrMarketDataProvider:
         "bid": "84",
         "ask": "86",
         "delta": "7308",
+        "gamma": "7309",
         "theta": "7310",
+        "vega": "7311",
         "implied_volatility": "7633",
         "open_interest": "7638",
     }
@@ -245,18 +249,20 @@ class IbkrMarketDataProvider:
             raise IncompleteDataError("IBKR no devolvió strikes PUT para el vencimiento seleccionado")
         return strikes
 
-    def get_put_contracts(self, conid: str, expiration: date, strikes: Sequence[float]) -> tuple[tuple[str, float], ...]:
+    def get_put_contracts(self, conid: str, expiration: date, strikes: Sequence[float], *, symbol: str) -> tuple[tuple[str, float], ...]:
+        """Return only contracts whose complete identity was confirmed.
+
+        ``expiration`` must be an exact expiry, rather than the first day used
+        merely to represent a monthly secdef bucket.
+        """
         self._require_derivative_search(conid)
         contracts: list[tuple[str, float]] = []
         for strike in strikes:
-            data = self._transport.get("/iserver/secdef/info", {
-                "conid": conid, "secType": "OPT", "month": _format_ibkr_month(expiration),
-                "exchange": "SMART", "strike": str(strike), "right": "P",
-            })
-            rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else ()
-            row = next((item for item in rows if isinstance(item, Mapping) and str(item.get("right", "P")).upper() in ("P", "PUT")), None)
-            if row is not None and row.get("conid") is not None:
-                contracts.append((str(row["conid"]), strike))
+            contract = self.confirm_put_contract(
+                conid, symbol, expiration, strike,
+                exact_maturity=expiration.strftime("%Y%m%d"),
+            )
+            contracts.append((contract.conid, contract.strike))
         if not contracts:
             raise IncompleteDataError("IBKR no devolvió contratos PUT para los strikes seleccionados")
         return tuple(contracts)
@@ -324,7 +330,8 @@ class IbkrMarketDataProvider:
                 )
             quotes.append(IbkrOptionQuote(
                 conid, strike, expiration, _number(row, "84", "bid"), _number(row, "86", "ask"),
-                _number(row, "7308", "delta"), _number(row, "7310", "theta"),
+                _number(row, "7308", "delta"), _number(row, "7309", "gamma"),
+                _number(row, "7310", "theta"), _number(row, "7311", "vega"),
                 _number(row, "7633", "iv"), _integer(row, "7638", "open_interest"),
                 _market_data_availability(row.get(self.MARKET_DATA_AVAILABILITY_FIELD)),
                 statuses,
@@ -453,17 +460,52 @@ class IbkrMarketDataProvider:
 
     # Compatibilidad con el puerto MarketDataProvider y con transportes normalizados.
     def get_underlying(self, symbol: str) -> Underlying:
-        data = self._transport.get("/iserver/marketdata/snapshot", {"symbol": symbol})
-        if isinstance(data, Mapping) and "last" in data:
-            return Underlying(symbol.upper(), float(data["last"]))
         conid, _ = self.locate_stock(symbol)
         return self.get_underlying_by_conid(symbol, conid)
 
     def get_option_market_data(self, symbol: str) -> tuple[MarketData, ...]:
-        data = self._transport.get("/iserver/secdef/strikes", {"symbol": symbol})
-        if not isinstance(data, Mapping) or "options" not in data:
-            raise IncompleteDataError("el endpoint no devolvió opciones normalizadas para el scanner")
-        return tuple(self._map_option(symbol.upper(), row) for row in data["options"])
+        """Discover, confirm and quote PUTs without trusting a monthly conid."""
+
+        underlying_conid, months = self.locate_stock(symbol)
+        confirmed: dict[str, ConfirmedOptionContract] = {}
+        for month in months:
+            for strike in self.get_put_strikes(underlying_conid, month):
+                data = self._transport.get("/iserver/secdef/info", {
+                    "conid": underlying_conid, "secType": "OPT", "month": _format_ibkr_month(month),
+                    "exchange": "SMART", "strike": str(strike), "right": "P",
+                })
+                rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else ()
+                for row in rows:
+                    if not isinstance(row, Mapping) or row.get("conid") is None:
+                        continue
+                    candidate = _confirmed_option(row)
+                    exact = _parse_maturity_date(candidate.maturity_date)
+                    # Mismatches are deliberately ignored and never enter the
+                    # set subsequently sent to marketdata/snapshot.
+                    if exact is not None and _contract_matches(candidate, symbol, month, strike, candidate.maturity_date):
+                        confirmed[candidate.conid] = candidate
+
+        if not confirmed:
+            raise IncompleteDataError("secdef/info no confirmó ningún contrato PUT con vencimiento exacto")
+
+        result: list[MarketData] = []
+        by_expiry: dict[date, list[ConfirmedOptionContract]] = {}
+        for contract in confirmed.values():
+            expiry = _parse_maturity_date(contract.maturity_date)
+            if expiry is not None:
+                by_expiry.setdefault(expiry, []).append(contract)
+        for expiry, contracts in by_expiry.items():
+            pairs = tuple((contract.conid, contract.strike) for contract in contracts)
+            for quote in self.get_put_quotes(pairs, expiry):
+                values = (quote.bid, quote.ask, quote.delta, quote.gamma, quote.theta, quote.vega, quote.implied_volatility)
+                if any(value is None for value in values) or quote.open_interest is None:
+                    continue
+                contract = OptionContract(quote.conid, symbol.upper(), OptionType.PUT, quote.strike, expiry)
+                result.append(MarketData(
+                    contract, *values, 0, quote.open_interest,
+                    market_data_availability=quote.market_data_availability.raw,
+                ))
+        return tuple(result)
 
     @staticmethod
     def _map_option(symbol: str, row: Mapping[str, Any]) -> MarketData:
@@ -484,6 +526,13 @@ def _parse_ibkr_month(value: str) -> date | None:
 
 def _format_ibkr_month(value: date) -> str:
     return f"{_MONTHS[value.month - 1]}{value.year % 100:02d}"
+
+
+def _parse_maturity_date(value: str) -> date | None:
+    try:
+        return date.fromisoformat(f"{value[:4]}-{value[4:6]}-{value[6:8]}")
+    except (TypeError, ValueError):
+        return None
 
 
 def _confirmed_option(row: Mapping[str, Any]) -> ConfirmedOptionContract:
@@ -519,7 +568,7 @@ def _contract_matches(
     expected_month = expiration.strftime("%Y%m")
     expected_maturity = re.sub(r"[^0-9]", "", exact_maturity or "")
     maturity_matches = (
-        contract.maturity_date == expected_maturity
+        contract.maturity_date == expected_maturity and contract.maturity_date.startswith(expected_month)
         if expected_maturity
         else contract.maturity_date.startswith(expected_month)
     )
@@ -562,7 +611,7 @@ def _is_explicitly_unavailable(value: Any) -> bool:
 def _safe_snapshot_summary(row: Mapping[str, Any]) -> str:
     """Expose solo identificadores/campos solicitados, nunca la respuesta HTTP."""
 
-    allowed = {"conid", "conidEx", "error", "message", "84", "86", "7308", "7310", "7633", "7638", "6509", "31"}
+    allowed = {"conid", "conidEx", "error", "message", "84", "86", "7308", "7309", "7310", "7311", "7633", "7638", "6509", "31"}
     parts = []
     for key in sorted((str(key) for key in row if str(key) in allowed)):
         if key in {"error", "message"}:
