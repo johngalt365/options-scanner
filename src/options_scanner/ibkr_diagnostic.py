@@ -7,7 +7,15 @@ from datetime import date
 import logging
 import sys
 
-from options_scanner.ibkr import ClientPortalTransport, IbkrError, IbkrMarketDataProvider, MarketDataFieldStatus
+from options_scanner.ibkr import (
+    ClientPortalTransport,
+    DeepSnapshotAttempt,
+    IbkrError,
+    IbkrMarketDataProvider,
+    MarketDataFieldStatus,
+    _is_explicitly_unavailable,
+    _market_data_availability,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expiration", help="mes YYYY-MM; por defecto selecciona el primero disponible")
     parser.add_argument("--contracts", type=int, default=3, help="número máximo de strikes/contratos")
     parser.add_argument("--verbose", action="store_true", help="muestra el resumen seguro de cada respuesta snapshot")
+    parser.add_argument("--deep", action="store_true", help="diagnóstico profundo de un único contrato PUT")
+    parser.add_argument("--strike", type=float, help="strike PUT exacto (obligatorio con --deep)")
     return parser
 
 
@@ -47,6 +57,40 @@ def run(provider: IbkrMarketDataProvider, symbol: str, expiration: str | None, l
         output(" | ".join(_display(value, status) for value, status in values))
 
 
+def run_deep(provider: IbkrMarketDataProvider, symbol: str, expiration: str | None, strike: float, *, output=print) -> None:
+    """Diagnostica exactamente un PUT y muestra solo fields de market data."""
+
+    provider.require_authenticated_session()
+    underlying_conid, expirations = provider.locate_stock(symbol)  # secdef/search obligatorio
+    selected = _select_expiration(expirations, expiration)
+    available = provider.get_put_strikes(underlying_conid, selected)
+    matching = next((value for value in available if value == strike), None)
+    if matching is None:
+        raise ValueError(f"el strike PUT {strike:g} no está disponible para {selected:%Y-%m}")
+    contracts = provider.get_put_contracts(underlying_conid, selected, (matching,))
+    contract_conid, actual_strike = contracts[0]
+    output(f"Contrato PUT: conid={contract_conid} vencimiento={selected:%Y-%m} strike={actual_strike:g}")
+    output(f"Fields solicitados: {provider.DEEP_OPTION_SNAPSHOT_FIELDS}")
+    for observation in provider.diagnose_put_contract(underlying_conid, contract_conid):
+        output(_display_deep_attempt(observation))
+
+
+def _display_deep_attempt(observation: DeepSnapshotAttempt) -> str:
+    entries = []
+    for field in IbkrMarketDataProvider.DEEP_OPTION_SNAPSHOT_FIELDS.split(","):
+        if field not in observation.fields:
+            value = "field no recibido"
+        elif _is_explicitly_unavailable(observation.fields[field]):
+            value = "field recibido con valor N/A"
+        elif field == "6509":
+            value = _market_data_availability(observation.fields[field]).display
+        else:
+            value = str(observation.fields[field])[:80]
+        entries.append(f"{field}={value}")
+    label = "pre-flight" if observation.phase == "pre-flight" else f"intento {observation.attempt}"
+    return f"{label}: " + " | ".join(entries)
+
+
 def _select_expiration(expirations: tuple[date, ...], requested: str | None) -> date:
     if requested is None:
         return min(expirations)
@@ -73,11 +117,17 @@ def _display(value: object | None, status: MarketDataFieldStatus | None = None) 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.deep and args.strike is None:
+        print("ERROR: --strike es obligatorio con --deep", file=sys.stderr)
+        return 2
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
     provider = IbkrMarketDataProvider(ClientPortalTransport(args.base_url, allow_insecure_tls=args.insecure_tls))
     try:
-        run(provider, args.symbol, args.expiration, args.contracts)
+        if args.deep:
+            run_deep(provider, args.symbol, args.expiration, args.strike)
+        else:
+            run(provider, args.symbol, args.expiration, args.contracts)
     except (IbkrError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

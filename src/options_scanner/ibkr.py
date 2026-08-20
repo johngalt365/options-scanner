@@ -125,6 +125,15 @@ class IbkrOptionQuote:
     field_statuses: Mapping[str, MarketDataFieldStatus]
 
 
+@dataclass(frozen=True, slots=True)
+class DeepSnapshotAttempt:
+    """Una entrega aislada del diagnóstico profundo (sin payload HTTP)."""
+
+    phase: str
+    attempt: int
+    fields: Mapping[str, Any]
+
+
 class IbkrMarketDataProvider:
     """Proveedor del scanner y operaciones de descubrimiento para el diagnóstico."""
 
@@ -141,6 +150,7 @@ class IbkrMarketDataProvider:
     }
     MARKET_DATA_AVAILABILITY_FIELD = "6509"
     OPTION_SNAPSHOT_FIELDS = ",".join((*OPTION_FIELD_IDS.values(), MARKET_DATA_AVAILABILITY_FIELD))
+    DEEP_OPTION_SNAPSHOT_FIELDS = "31,84,86,6509,7308,7310,7633,7638"
     # Kept as a compatibility alias for callers/tests written before fields
     # were split by instrument type.
     SNAPSHOT_FIELDS = UNDERLYING_SNAPSHOT_FIELDS
@@ -259,6 +269,37 @@ class IbkrMarketDataProvider:
                 statuses,
             ))
         return tuple(quotes)
+
+    def diagnose_put_contract(
+        self,
+        underlying_conid: str,
+        contract_conid: str,
+        *,
+        retry_delays: Sequence[float] = (0.25, 0.5, 1.0, 2.0, 3.0),
+    ) -> tuple[DeepSnapshotAttempt, ...]:
+        """Captura la evolución de un único snapshot de opción, sin fusionarla.
+
+        Es deliberadamente una primitiva de diagnóstico de solo lectura. Cada
+        elemento conserva únicamente los market-data field IDs solicitados; no
+        expone el payload completo, cabeceras ni datos de sesión.
+        """
+
+        self._require_derivative_search(underlying_conid)
+        params = {"conids": str(contract_conid), "fields": self.DEEP_OPTION_SNAPSHOT_FIELDS}
+        observations: list[DeepSnapshotAttempt] = []
+
+        rows = self._snapshot_request(params)
+        for row in rows:
+            self._raise_if_unauthorized(row)
+        observations.append(DeepSnapshotAttempt("pre-flight", 0, _deep_snapshot_fields(rows, contract_conid)))
+        for attempt, delay in enumerate(retry_delays, 1):
+            if delay > 0:
+                time.sleep(delay)
+            rows = self._snapshot_request(params)
+            for row in rows:
+                self._raise_if_unauthorized(row)
+            observations.append(DeepSnapshotAttempt("snapshot", attempt, _deep_snapshot_fields(rows, contract_conid)))
+        return tuple(observations)
 
     def _require_derivative_search(self, conid: str) -> None:
         if str(conid) not in self._searched_underlyings:
@@ -426,6 +467,27 @@ def _safe_snapshot_summary(row: Mapping[str, Any]) -> str:
     if unknown:
         parts.append(f"otras_claves={unknown}")
     return "{" + ", ".join(parts) + "}"
+
+
+def _deep_snapshot_fields(rows: Sequence[Mapping[str, Any]], conid: str) -> Mapping[str, Any]:
+    """Select only requested market fields from the row for ``conid``."""
+
+    row = next(
+        (item for item in rows if str(item.get("conid", item.get("conidEx", ""))).split("@", 1)[0] == str(conid)),
+        rows[0] if len(rows) == 1 else {},
+    )
+    allowed = set(IbkrMarketDataProvider.DEEP_OPTION_SNAPSHOT_FIELDS.split(","))
+    return {field: _safe_market_value(row[field]) for field in allowed if field in row}
+
+
+def _safe_market_value(value: Any) -> Any:
+    """Keep scalar market values only and bound strings before diagnostics."""
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return " ".join(value.split())[:80]
+    return "valor no escalar omitido"
 
 
 def _has_permission_message(message: str) -> bool:
