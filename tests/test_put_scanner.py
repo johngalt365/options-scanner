@@ -4,7 +4,13 @@ import threading
 import time
 from unittest import TestCase
 
-from options_scanner.ibkr import IbkrMarketDataProvider, IbkrOptionQuote, MarketDataAvailability
+from options_scanner.ibkr import (
+    ContractResolutionAccounting,
+    IbkrMarketDataProvider,
+    IbkrOptionQuote,
+    MarketDataAvailability,
+    _market_data_availability,
+)
 from options_scanner.scan_puts import ScanSummary, _ibkr_candidates
 from options_scanner.scanner import PutScanCandidate, rank_candidates
 
@@ -114,6 +120,12 @@ class ProductiveIbkrScannerTest(TestCase):
 
 
 class PhaseBudgetTest(TestCase):
+    def test_contract_accounting_invariant_is_enforced(self):
+        valid = ContractResolutionAccounting(117, 90, 20, 7, 3)
+        self.assertEqual(valid.resolved + valid.failed + valid.unresolved_timeout, valid.target)
+        with self.assertRaises(ValueError):
+            ContractResolutionAccounting(117, 90, 20, 8, 0)
+
     class Clock:
         def __init__(self):
             self.value = 100.0
@@ -209,6 +221,62 @@ class PhaseBudgetTest(TestCase):
         _ibkr_candidates(provider, self.args(), date(2026, 8, 20), summary=summary, clock=clock)
         self.assertEqual(summary.timeout_phase, "market_data_snapshots")
         self.assertEqual(provider.market_contract_count, 25)
+
+    def test_completed_futures_at_soft_deadline_are_not_a_partial_timeout(self):
+        class SlowTransport:
+            def get(self, path, params):
+                if path.endswith("secdef/info"):
+                    time.sleep(.03)
+                    return [{
+                        "conid": f"9{params['strike']}", "symbol": "NVDA", "secType": "OPT",
+                        "right": "P", "strike": params["strike"], "maturityDate": "20260925",
+                    }]
+                raise AssertionError(path)
+
+        provider = IbkrMarketDataProvider(SlowTransport())
+        provider._searched_underlyings.add("10")
+        accounts = []
+        contracts = provider.discover_put_contracts(
+            "10", date(2026, 9, 1), (80, 81), symbol="NVDA",
+            deadline=time.monotonic() + .005, max_workers=2, accounting=accounts.append,
+        )
+        self.assertEqual(len(contracts), 2)
+        self.assertEqual(accounts, [ContractResolutionAccounting(2, 2, 0, 0, 0)])
+
+    def test_market_data_completeness_and_6509_categories_are_counted(self):
+        provider = self.Provider(self.Clock(), target_count=5)
+        patterns = (
+            (1, 1.2, -.2, "RealTime"),
+            (1, 1.2, None, "Frozen"),
+            (None, None, -.2, "Delayed"),
+            (None, None, None, "Not Subscribed"),
+            (None, None, None, "no indicado"),
+        )
+        def quotes(contracts, expiration, **kwargs):
+            return tuple(IbkrOptionQuote(
+                conid, strike, date(2026, 9, 25), bid, ask, delta,
+                None, None, None, None, None,
+                MarketDataAvailability(None, feed, False, False), {},
+            ) for (conid, strike), (bid, ask, delta, feed) in zip(contracts, patterns))
+        provider.get_put_quotes_batched = quotes
+        summary = ScanSummary()
+        _ibkr_candidates(provider, self.args(min_safety_margin=0), date(2026, 8, 20), summary=summary, clock=provider.clock)
+        self.assertEqual(
+            (summary.with_bid_ask_delta, summary.with_bid_ask_without_delta,
+             summary.with_delta_without_bid_ask, summary.without_bid_ask_delta),
+            (1, 1, 1, 2),
+        )
+        self.assertEqual(
+            (summary.market_data_realtime, summary.market_data_frozen,
+             summary.market_data_delayed, summary.market_data_not_subscribed,
+             summary.market_data_unknown),
+            (1, 1, 1, 1, 1),
+        )
+
+    def test_6509_zbd_is_frozen_with_book(self):
+        availability = _market_data_availability("ZBd")
+        self.assertEqual(availability.feed, "Frozen")
+        self.assertTrue(availability.book)
 
 
 class BatchedSnapshotTest(TestCase):

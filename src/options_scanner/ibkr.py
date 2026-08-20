@@ -160,6 +160,21 @@ class ConfirmedOptionContract:
     valid_exchanges: str
 
 
+@dataclass(frozen=True, slots=True)
+class ContractResolutionAccounting:
+    """Terminal accounting for the unique validation requests in one group."""
+
+    target: int
+    resolved: int
+    failed: int
+    unresolved_timeout: int
+    deduplicated: int
+
+    def __post_init__(self) -> None:
+        if self.resolved + self.failed + self.unresolved_timeout != self.target:
+            raise ValueError("la contabilidad de resolución contractual no cuadra")
+
+
 class IbkrMarketDataProvider:
     """Proveedor del scanner y operaciones de descubrimiento para el diagnóstico."""
 
@@ -308,6 +323,7 @@ class IbkrMarketDataProvider:
         self, conid: str, month: date, strikes: Sequence[float], *, symbol: str,
         deadline: float | None = None,
         progress: Callable[[int, int], None] | None = None,
+        accounting: Callable[[ContractResolutionAccounting], None] | None = None,
         max_workers: int = 4,
     ) -> tuple[ConfirmedOptionContract, ...]:
         """Descubre identidades PUT válidas con concurrencia pequeña y acotada.
@@ -317,13 +333,16 @@ class IbkrMarketDataProvider:
         salida es el orden de los strikes de entrada, no el de finalización.
         """
         self._require_derivative_search(conid)
-        unique_strikes = tuple(dict.fromkeys(float(value) for value in strikes))
+        requested_strikes = tuple(float(value) for value in strikes)
+        unique_strikes = tuple(dict.fromkeys(requested_strikes))
         total = len(unique_strikes)
+        deduplicated = len(requested_strikes) - total
 
-        def resolve(strike: float) -> tuple[ConfirmedOptionContract, ...]:
+        def resolve(strike: float) -> tuple[tuple[ConfirmedOptionContract, ...], bool]:
             key = (str(conid), symbol.upper(), month, float(strike))
             with self._contract_cache_lock:
                 candidates = self._contract_cache.get(key)
+            validated = candidates is None
             if candidates is None:
                 data = self._get("/iserver/secdef/info", {
                     "conid": conid, "secType": "OPT", "month": _format_ibkr_month(month),
@@ -342,20 +361,21 @@ class IbkrMarketDataProvider:
                 # Cache only the result of a real secdef/info validation.
                 with self._contract_cache_lock:
                     self._contract_cache[key] = candidates
-            return candidates
+            return candidates, validated
 
-        results: dict[float, tuple[ConfirmedOptionContract, ...]] = {}
-        pending_strikes = iter(unique_strikes)
+        results: dict[float, tuple[tuple[ConfirmedOptionContract, ...], bool]] = {}
+        next_strike = 0
         executor = ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), 16)))
         futures = {}
 
         def submit_one() -> bool:
+            nonlocal next_strike
             if deadline is not None and time.monotonic() >= deadline:
                 return False
-            try:
-                strike = next(pending_strikes)
-            except StopIteration:
+            if next_strike >= total:
                 return False
+            strike = unique_strikes[next_strike]
+            next_strike += 1
             futures[executor.submit(resolve, strike)] = strike
             return True
 
@@ -367,17 +387,26 @@ class IbkrMarketDataProvider:
             while futures:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
-                    break
-                done, _ = wait(futures, timeout=remaining, return_when=FIRST_COMPLETED)
-                if not done:
-                    break
+                    # If every validation was launched, the deadline only caught
+                    # the tail of already-running HTTP calls. Drain that tail so
+                    # completed work is not reported as a partial timeout.
+                    if next_strike == total:
+                        done, _ = wait(futures)
+                    else:
+                        done = {future for future in futures if future.done()}
+                    if not done:
+                        break
+                else:
+                    done, _ = wait(futures, timeout=remaining, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
                 for future in done:
                     strike = futures.pop(future)
                     try:
                         results[strike] = future.result()
                     except Exception as exc:  # one failed secdef/info must not abort the scan
                         logger.warning("No se pudo validar el contrato PUT strike=%g: %s", strike, exc)
-                        results[strike] = ()
+                        results[strike] = ((), True)
                     completed += 1
                     if progress is not None:
                         progress(completed, total)
@@ -389,8 +418,18 @@ class IbkrMarketDataProvider:
 
         confirmed: dict[str, ConfirmedOptionContract] = {}
         for strike in unique_strikes:
-            for candidate in results.get(strike, ()):
+            candidates, _ = results.get(strike, ((), True))
+            for candidate in candidates:
                 confirmed.setdefault(candidate.conid, candidate)
+        cache_hits = sum(not validated for _, validated in results.values())
+        target = total - cache_hits
+        resolved = sum(bool(candidates) and validated for candidates, validated in results.values())
+        failed = sum(not candidates and validated for candidates, validated in results.values())
+        unresolved = target - resolved - failed
+        if accounting is not None:
+            accounting(ContractResolutionAccounting(
+                target, resolved, failed, unresolved, deduplicated + cache_hits,
+            ))
         return tuple(confirmed.values())
 
     @staticmethod
