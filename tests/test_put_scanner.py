@@ -1,5 +1,7 @@
 from argparse import Namespace
 from datetime import date
+import threading
+import time
 from unittest import TestCase
 
 from options_scanner.ibkr import IbkrMarketDataProvider, IbkrOptionQuote, MarketDataAvailability
@@ -120,12 +122,15 @@ class PhaseBudgetTest(TestCase):
             return self.value
 
     class Provider:
-        def __init__(self, clock, resolution_seconds=0, market_seconds=0):
+        def __init__(self, clock, resolution_seconds=0, market_seconds=0,
+                     resolved_count=None, target_count=25):
             self.clock = clock
             self.resolution_seconds = resolution_seconds
             self.market_seconds = market_seconds
             self.market_deadline = None
             self.market_contract_count = 0
+            self.resolved_count = resolved_count
+            self.target_count = target_count
 
         def require_authenticated_session(self):
             pass
@@ -134,7 +139,7 @@ class PhaseBudgetTest(TestCase):
             return type("Underlying", (), {"current_price": 100.0})(), "10", (date(2026, 9, 1),)
 
         def get_put_strikes(self, conid, month):
-            return tuple(range(50, 75))
+            return tuple(range(50, 50 + self.target_count))
 
         def discover_put_contracts(self, conid, month, strikes, **kwargs):
             self.clock.value += self.resolution_seconds
@@ -142,10 +147,11 @@ class PhaseBudgetTest(TestCase):
             if progress:
                 for index in range(1, len(strikes) + 1):
                     progress(index, len(strikes))
+            resolved = len(strikes) if self.resolved_count is None else self.resolved_count
             return tuple(type("Contract", (), {
                 "conid": str(9000 + strike), "strike": float(strike),
                 "maturity_date": "20260925",
-            })() for strike in strikes)
+            })() for strike in strikes[:resolved])
 
         @staticmethod
         def contract_expiration(contract):
@@ -183,11 +189,18 @@ class PhaseBudgetTest(TestCase):
 
     def test_timeout_during_contract_resolution_is_named(self):
         clock = self.Clock()
-        provider = self.Provider(clock, resolution_seconds=21)
+        provider = self.Provider(clock, resolution_seconds=21, resolved_count=39, target_count=44)
         summary = ScanSummary()
-        self.assertEqual(_ibkr_candidates(provider, self.args(), date(2026, 8, 20), summary=summary, clock=clock), [])
+        candidates = _ibkr_candidates(
+            provider, self.args(min_safety_margin=0), date(2026, 8, 20),
+            summary=summary, clock=clock,
+        )
         self.assertEqual(summary.timeout_phase, "contract_resolution")
-        self.assertEqual(provider.market_contract_count, 0)
+        self.assertEqual((summary.target_contracts, summary.resolved_contracts,
+                          summary.unresolved_contracts_timeout), (44, 39, 5))
+        self.assertEqual((len(candidates), provider.market_contract_count), (39, 39))
+        self.assertEqual([candidate.strike for candidate in rank_candidates(candidates)],
+                         sorted(candidate.strike for candidate in candidates))
 
     def test_timeout_during_market_data_is_named(self):
         clock = self.Clock()
@@ -291,3 +304,53 @@ class BatchedSnapshotTest(TestCase):
         info_calls = [path for path, _ in transport.calls if path.endswith("secdef/info")]
         self.assertEqual(len(info_calls), 1)
         self.assertEqual(provider.http_call_counts["secdef/info"], 1)
+
+
+class ConcurrentContractResolutionTest(TestCase):
+    class Transport:
+        def __init__(self, failures=()):
+            self.failures = set(failures)
+            self.active = 0
+            self.maximum = 0
+            self.lock = threading.Lock()
+            self.info_calls = []
+
+        def get(self, path, params):
+            if path.endswith("secdef/search"):
+                return [{"symbol": "NVDA", "conid": 10,
+                         "sections": [{"secType": "OPT", "months": "SEP26"}]}]
+            if path.endswith("secdef/info"):
+                strike = float(params["strike"])
+                with self.lock:
+                    self.active += 1
+                    self.maximum = max(self.maximum, self.active)
+                    self.info_calls.append(strike)
+                # Reverse finish order to prove output does not depend on it.
+                time.sleep((85 - strike) * .002)
+                with self.lock:
+                    self.active -= 1
+                if strike in self.failures:
+                    raise RuntimeError("fallo aislado")
+                return [{"conid": int(9000 + strike), "symbol": "NVDA", "secType": "OPT",
+                         "right": "P", "strike": strike, "maturityDate": "20260925"}]
+            raise AssertionError(path)
+
+    def test_bounded_deterministic_deduplicated_and_error_isolated(self):
+        transport = self.Transport(failures=(82,))
+        provider = IbkrMarketDataProvider(transport)
+        conid, months = provider.locate_stock("NVDA")
+        contracts = provider.discover_put_contracts(
+            conid, months[0], (80, 81, 82, 83, 84, 80), symbol="NVDA", max_workers=2,
+        )
+        self.assertLessEqual(transport.maximum, 2)
+        self.assertEqual([contract.strike for contract in contracts], [80, 81, 83, 84])
+        self.assertEqual(transport.info_calls.count(80), 1)
+
+        # Successful validations are cached; an earlier transport error may be retried.
+        before = len(transport.info_calls)
+        again = provider.discover_put_contracts(
+            conid, months[0], (84, 82, 80), symbol="NVDA", max_workers=4,
+        )
+        self.assertEqual([contract.strike for contract in again], [84, 80])
+        self.assertEqual(len(transport.info_calls), before + 1)
+        self.assertEqual(transport.info_calls[-1], 82)

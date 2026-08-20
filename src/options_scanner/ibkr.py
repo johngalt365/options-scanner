@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
@@ -10,6 +11,7 @@ import json
 import logging
 import re
 import ssl
+import threading
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -205,6 +207,7 @@ class IbkrMarketDataProvider:
         self._searched_underlyings: set[str] = set()
         self._strikes_cache: dict[tuple[str, date], tuple[float, ...]] = {}
         self._contract_cache: dict[tuple[str, str, date, float], tuple[ConfirmedOptionContract, ...]] = {}
+        self._contract_cache_lock = threading.Lock()
         self.http_call_counts: Counter[str] = Counter()
 
     def _get(self, path: str, params: Mapping[str, str]) -> Any:
@@ -305,15 +308,22 @@ class IbkrMarketDataProvider:
         self, conid: str, month: date, strikes: Sequence[float], *, symbol: str,
         deadline: float | None = None,
         progress: Callable[[int, int], None] | None = None,
+        max_workers: int = 4,
     ) -> tuple[ConfirmedOptionContract, ...]:
-        """Descubre vencimientos exactos y conserva solo identidades PUT válidas."""
+        """Descubre identidades PUT válidas con concurrencia pequeña y acotada.
+
+        Cada respuesta sigue ligada a su strike, se valida íntegramente y los
+        fallos aislados no invalidan contratos ya confirmados. El orden de
+        salida es el orden de los strikes de entrada, no el de finalización.
+        """
         self._require_derivative_search(conid)
-        confirmed: dict[str, ConfirmedOptionContract] = {}
-        for index, strike in enumerate(strikes, 1):
-            if deadline is not None and time.monotonic() >= deadline:
-                break
+        unique_strikes = tuple(dict.fromkeys(float(value) for value in strikes))
+        total = len(unique_strikes)
+
+        def resolve(strike: float) -> tuple[ConfirmedOptionContract, ...]:
             key = (str(conid), symbol.upper(), month, float(strike))
-            candidates = self._contract_cache.get(key)
+            with self._contract_cache_lock:
+                candidates = self._contract_cache.get(key)
             if candidates is None:
                 data = self._get("/iserver/secdef/info", {
                     "conid": conid, "secType": "OPT", "month": _format_ibkr_month(month),
@@ -330,11 +340,57 @@ class IbkrMarketDataProvider:
                         found.append(candidate)
                 candidates = tuple(found)
                 # Cache only the result of a real secdef/info validation.
-                self._contract_cache[key] = candidates
-            for candidate in candidates:
-                confirmed[candidate.conid] = candidate
-            if progress is not None:
-                progress(index, len(strikes))
+                with self._contract_cache_lock:
+                    self._contract_cache[key] = candidates
+            return candidates
+
+        results: dict[float, tuple[ConfirmedOptionContract, ...]] = {}
+        pending_strikes = iter(unique_strikes)
+        executor = ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), 16)))
+        futures = {}
+
+        def submit_one() -> bool:
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            try:
+                strike = next(pending_strikes)
+            except StopIteration:
+                return False
+            futures[executor.submit(resolve, strike)] = strike
+            return True
+
+        try:
+            for _ in range(max(1, min(int(max_workers), 16))):
+                if not submit_one():
+                    break
+            completed = 0
+            while futures:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    break
+                done, _ = wait(futures, timeout=remaining, return_when=FIRST_COMPLETED)
+                if not done:
+                    break
+                for future in done:
+                    strike = futures.pop(future)
+                    try:
+                        results[strike] = future.result()
+                    except Exception as exc:  # one failed secdef/info must not abort the scan
+                        logger.warning("No se pudo validar el contrato PUT strike=%g: %s", strike, exc)
+                        results[strike] = ()
+                    completed += 1
+                    if progress is not None:
+                        progress(completed, total)
+                    submit_one()
+        finally:
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        confirmed: dict[str, ConfirmedOptionContract] = {}
+        for strike in unique_strikes:
+            for candidate in results.get(strike, ()):
+                confirmed.setdefault(candidate.conid, candidate)
         return tuple(confirmed.values())
 
     @staticmethod
@@ -543,6 +599,12 @@ class IbkrMarketDataProvider:
             target.update(row)
 
     def _snapshot_request(self, params: Mapping[str, str]) -> tuple[Mapping[str, Any], ...]:
+        metric = (
+            "marketdata/snapshot/underlying"
+            if params.get("fields") == self.UNDERLYING_SNAPSHOT_FIELDS
+            else "marketdata/snapshot/options"
+        )
+        self.http_call_counts[metric] += 1
         data = self._get("/iserver/marketdata/snapshot", params)
         rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else (data,)
         return tuple(row for row in rows if isinstance(row, Mapping))
