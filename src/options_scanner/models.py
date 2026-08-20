@@ -1,4 +1,4 @@
-"""Modelos de dominio independientes de cualquier proveedor de mercado."""
+"""Modelos de dominio inmutables e independientes del proveedor."""
 
 from dataclasses import dataclass
 from datetime import date
@@ -6,8 +6,6 @@ from enum import StrEnum
 
 
 class OptionType(StrEnum):
-    """Tipos de opción soportados por el modelo."""
-
     CALL = "CALL"
     PUT = "PUT"
 
@@ -19,8 +17,6 @@ def _require_text(value: str, field_name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class User:
-    """Identidad mínima de un propietario, sin datos de autenticación."""
-
     id: str
     display_name: str
 
@@ -31,8 +27,6 @@ class User:
 
 @dataclass(frozen=True, slots=True)
 class Watchlist:
-    """Lista de símbolos que pertenece exclusivamente a un usuario."""
-
     id: str
     user_id: str
     name: str
@@ -48,8 +42,6 @@ class Watchlist:
 
 @dataclass(frozen=True, slots=True)
 class StrategyParameters:
-    """Configuración guardada de una estrategia para un usuario."""
-
     id: str
     user_id: str
     name: str
@@ -70,24 +62,7 @@ class StrategyParameters:
 
 
 @dataclass(frozen=True, slots=True)
-class SavedScanResult:
-    """Resultado inmutable guardado en el espacio de un usuario."""
-
-    id: str
-    user_id: str
-    strategy_parameters_id: str
-    contracts: tuple["OptionContract", ...]
-
-    def __post_init__(self) -> None:
-        _require_text(self.id, "id")
-        _require_text(self.user_id, "user_id")
-        _require_text(self.strategy_parameters_id, "strategy_parameters_id")
-
-
-@dataclass(frozen=True, slots=True)
 class Underlying:
-    """Instantánea simplificada del precio de un subyacente."""
-
     symbol: str
     current_price: float
 
@@ -99,22 +74,56 @@ class Underlying:
 
 @dataclass(frozen=True, slots=True)
 class OptionContract:
-    """Contrato con los campos mínimos necesarios para el primer filtro."""
+    """Identidad y términos del contrato; no contiene datos de mercado."""
 
-    symbol: str
+    id: str
+    underlying_symbol: str
     option_type: OptionType
     strike: float
     expiration: date
-    delta: float
 
     def __post_init__(self) -> None:
-        _require_text(self.symbol, "symbol")
+        _require_text(self.id, "id")
+        _require_text(self.underlying_symbol, "underlying_symbol")
         if self.strike <= 0:
             raise ValueError("strike debe ser positivo")
-        if not -1 <= self.delta <= 1:
-            raise ValueError("delta debe estar entre -1 y 1")
 
     def days_to_expiration(self, as_of: date) -> int:
-        """Devuelve los días naturales restantes hasta el vencimiento."""
-
         return (self.expiration - as_of).days
+
+
+@dataclass(frozen=True, slots=True)
+class MarketData:
+    """Cotización completa de un contrato en un instante lógico."""
+
+    contract: OptionContract
+    bid: float
+    ask: float
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    implied_volatility: float
+    volume: int
+    open_interest: int
+
+    def __post_init__(self) -> None:
+        if self.bid < 0 or self.ask < 0 or self.ask < self.bid:
+            raise ValueError("bid/ask no forman un mercado válido")
+        if not -1 <= self.delta <= 1:
+            raise ValueError("delta debe estar entre -1 y 1")
+        if self.implied_volatility < 0 or self.volume < 0 or self.open_interest < 0:
+            raise ValueError("IV, volumen y open interest no pueden ser negativos")
+
+
+@dataclass(frozen=True, slots=True)
+class SavedScanResult:
+    id: str
+    user_id: str
+    strategy_parameters_id: str
+    contracts: tuple[OptionContract, ...]
+
+    def __post_init__(self) -> None:
+        _require_text(self.id, "id")
+        _require_text(self.user_id, "user_id")
+        _require_text(self.strategy_parameters_id, "strategy_parameters_id")

@@ -1,16 +1,14 @@
-from datetime import date, timedelta
+from datetime import date
 from unittest import TestCase
 
-from options_scanner.filters import filter_put_candidates
+from options_scanner.market_data import FakeMarketDataProvider
 from options_scanner.models import (
-    OptionContract,
-    OptionType,
     SavedScanResult,
     StrategyParameters,
-    Underlying,
     User,
     Watchlist,
 )
+from options_scanner.scanner import scan_puts
 from options_scanner.workspace import UserWorkspaceStore
 
 
@@ -66,10 +64,5 @@ class UserWorkspaceStoreTest(TestCase):
 class UserIndependentScannerTest(TestCase):
     def test_scanner_runs_without_user_context(self) -> None:
         as_of = date(2026, 8, 20)
-        contract = OptionContract(
-            "NVDA", OptionType.PUT, 75.0, as_of + timedelta(days=35), -0.20
-        )
-
-        result = filter_put_candidates(Underlying("NVDA", 100.0), [contract], as_of)
-
-        self.assertEqual(result, [contract])
+        result = scan_puts(FakeMarketDataProvider(), "NVDA", as_of)
+        self.assertEqual(len(result), 2)
