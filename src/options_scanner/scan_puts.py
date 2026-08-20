@@ -245,31 +245,33 @@ def _print(candidates: list[PutScanCandidate]) -> None:
 
 def main() -> None:
     args = _arguments()
-    today = date.today()
+    from options_scanner.scan_service import PutScanService, ScanRequest
+
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.ERROR)
     if args.fake:
         provider = FakeMarketDataProvider()
-        quotes = scan_puts(provider, args.ticker, today, min_dte=args.min_dte, max_dte=args.max_dte,
-                           min_safety_margin=args.min_safety_margin, min_abs_delta=args.min_abs_delta,
-                           max_abs_delta=args.max_abs_delta)
-        candidates = build_candidates(provider.get_underlying(args.ticker).current_price, quotes, today)
     else:
-        logging.basicConfig(level=logging.DEBUG if args.verbose else logging.ERROR)
         provider = IbkrMarketDataProvider(ClientPortalTransport(
             args.base_url, allow_insecure_tls=args.insecure,
             timeout=max(0.1, min(10.0, args.scan_timeout)),
         ))
-        summary = ScanSummary()
-        candidates = _ibkr_candidates(provider, args, today, summary=summary)
-    rank_started = time.monotonic()
-    ranked = rank_candidates(candidates)
-    if not args.fake:
-        summary.phase_seconds["filtering_ranking"] = summary.phase_seconds.get("filtering_ranking", 0.0) + (time.monotonic() - rank_started)
+    result = PutScanService().run(
+        ScanRequest(
+            args.ticker, args.min_dte, args.max_dte, args.min_safety_margin,
+            args.min_abs_delta, args.max_abs_delta, args.fake,
+        ),
+        base_url=args.base_url, allow_insecure_tls=args.insecure,
+        scan_timeout=args.scan_timeout, market_data_timeout=args.market_data_timeout,
+        provider=provider, batch_size=args.batch_size, snapshot_attempts=args.snapshot_attempts,
+        contract_workers=args.contract_workers, progress=args.progress, verbose=args.verbose,
+    )
+    ranked = list(result.candidates)
+    summary = result.summary
     print("CANDIDATOS COMPLETOS (ranking por annualized_premium_yield)")
     _print(ranked)
-    incomplete = [candidate for candidate in candidates if not candidate.complete]
-    if incomplete:
+    if result.incomplete_candidates:
         print("\nCANDIDATOS INCOMPLETOS (fuera del ranking)")
-        _print(incomplete)
+        _print(list(result.incomplete_candidates))
     if not args.fake:
         print(
             "\nRESUMEN: "

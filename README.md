@@ -2,7 +2,7 @@
 
 Base modular para una aplicación multiusuario de análisis de opciones. El MVP
 busca PUTs de NVDA por DTE, margen de seguridad y delta. No implementa órdenes,
-login, base de datos, frontend, Docker ni conexiones de red reales.
+login web, base de datos, Docker ni ejecución de operaciones.
 
 ## Arquitectura
 
@@ -12,6 +12,8 @@ src/options_scanner/
 ├── filters.py      # reglas puras, independientes de proveedores
 ├── market_data.py  # puerto MarketDataProvider y FakeMarketDataProvider
 ├── scanner.py      # servicio que orquesta cualquier proveedor
+├── scan_service.py # caso de uso compartido por CLI y web
+├── web.py           # interfaz local WSGI sin dependencias externas
 ├── ibkr.py         # adaptador IBKR y transporte HTTP inyectable
 ├── ibkr_diagnostic.py # diagnóstico CLI de Client Portal Gateway
 ├── workspace.py    # espacios en memoria aislados por usuario
@@ -58,6 +60,26 @@ python -m pip install -e .
 python -m options_scanner.example
 python -m unittest discover -s tests -v
 ```
+
+## Interfaz web local
+
+La interfaz usa únicamente la biblioteca estándar de Python y el mismo flujo
+productivo de solo lectura del scanner. No almacena credenciales, cookies ni
+sesiones, y no contiene controles para operar. Arráncala desde la raíz:
+
+```bash
+python -m pip install -e .
+python -m options_scanner.web
+```
+
+Abre exactamente <http://127.0.0.1:8000/>. El formulario comienza en **modo
+demostración**, que usa el proveedor fake y no requiere IBKR. Para datos reales,
+desmarca «Modo demostración», inicia Client Portal Gateway por separado en
+`https://localhost:5000`, autentícate directamente en Gateway y pulsa `Scan`.
+La aplicación solo escucha en loopback (`127.0.0.1`) y usa el Gateway en modo
+read-only; el certificado local self-signed se acepta únicamente para esa
+conexión local. Si Gateway no responde o perdió la autenticación, la página
+muestra un mensaje seguro y no expone el traceback ni respuestas internas.
 
 ## Scanner real de venta de PUTs
 
