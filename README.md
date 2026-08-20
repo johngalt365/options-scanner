@@ -83,8 +83,27 @@ PYTHONPATH=src python -m options_scanner.ibkr_diagnostic \
 El comando localiza el subyacente, muestra su precio y los meses disponibles,
 selecciona un vencimiento, elige strikes PUT cercanos al precio, resuelve sus
 contratos y muestra bid, ask, delta, theta, IV y open interest. Los snapshots de
-opciones usan los field IDs 84, 86, 7308, 7310, 7633 y 7698, respectivamente,
+opciones usan los field IDs 84, 86, 7308, 7310, 7633 y 7638, respectivamente,
 y realizan un pre-flight seguido de reintentos porque la entrega es asíncrona.
+El field 6509 (`Market Data Availability`) se solicita y muestra literalmente
+por contrato, junto con su estado RealTime/Delayed/Frozen/Frozen-Delayed/Not
+Subscribed, la marca `incomplete` y la disponibilidad de book. Por tanto, un
+bid/ask ausente se describe como dato parcial o no disponible, pero no se
+interpreta por sí solo como falta de suscripción.
+Siguiendo el prerrequisito de Client Portal Web API para derivados, el flujo
+llama primero a `/iserver/secdef/search` para el subyacente; solo después
+consulta strikes, resuelve los contratos y solicita sus snapshots.
+
+Que una respuesta incluya `31` (last), `7308` (delta) y `7310` (theta), pero no
+bid/ask, IV u open interest, no prueba por sí solo un problema con OPRA: Client
+Portal entrega el snapshot de forma asíncrona y cada field puede estar ausente.
+El diagnóstico conserva las entregas parciales entre reintentos y presenta
+`6509` por contrato para distinguir el estado que comunica IBKR sin inferirlo
+de los fields ausentes. Open interest (`7638`) tampoco debe confundirse con
+`7698`, que es Last Yield para bonos.
+
+Referencia revisada: [Client Portal Web API v1, endpoints y campos de market
+data de IBKR](https://ibkrcampus.com/campus/ibkr-api-page/cpapi-v1/).
 Un `N/D` lleva su causa: pendiente después del pre-flight, campo marcado como no
 disponible por IBKR o respuesta parcial. La falta de suscripción/permisos genera
 un error específico. `--verbose` registra por intento solo conid, field IDs y

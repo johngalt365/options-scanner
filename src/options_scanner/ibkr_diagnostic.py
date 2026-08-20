@@ -35,9 +35,9 @@ def run(provider: IbkrMarketDataProvider, symbol: str, expiration: str | None, l
     output("Strikes PUT seleccionados: " + ", ".join(f"{strike:g}" for strike in nearby))
     contracts = provider.get_put_contracts(conid, selected, nearby)
     output(f"Contratos PUT encontrados: {len(contracts)}")
-    output("conid | strike | bid | ask | delta | theta | IV | open interest")
+    output("conid | strike | 6509 Market Data Availability | bid | ask | delta | theta | IV | open interest")
     for quote in provider.get_put_quotes(contracts, selected):
-        values = ((quote.conid, None), (quote.strike, None)) + tuple(
+        values = ((quote.conid, None), (quote.strike, None), (quote.market_data_availability.display, None)) + tuple(
             (getattr(quote, attribute), quote.field_statuses[name])
             for attribute, name in (
                 ("bid", "bid"), ("ask", "ask"), ("delta", "delta"), ("theta", "theta"),
