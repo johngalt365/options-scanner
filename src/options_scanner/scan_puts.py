@@ -27,8 +27,7 @@ def _arguments() -> argparse.Namespace:
 
 def _ibkr_candidates(provider: IbkrMarketDataProvider, args: argparse.Namespace, today: date) -> list[PutScanCandidate]:
     provider.require_authenticated_session()
-    conid, months = provider.locate_stock(args.ticker)
-    underlying = provider.get_underlying_by_conid(args.ticker, conid)
+    underlying, conid, months = provider.resolve_underlying(args.ticker)
     result: list[PutScanCandidate] = []
     for month in months:
         strikes = tuple(

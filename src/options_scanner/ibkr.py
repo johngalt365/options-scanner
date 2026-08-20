@@ -179,17 +179,28 @@ class IbkrMarketDataProvider:
     # Kept as a compatibility alias for callers/tests written before fields
     # were split by instrument type.
     SNAPSHOT_FIELDS = UNDERLYING_SNAPSHOT_FIELDS
+    # The same backoff is used by production snapshots and by the deep
+    # diagnostic.  Client Portal snapshots are asynchronous: the pre-flight
+    # response often contains only the contract identifier.
+    SNAPSHOT_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 3.0)
 
     def __init__(
         self,
         transport: IbkrTransport,
         *,
-        snapshot_attempts: int = 3,
-        snapshot_retry_delay: float = 0.1,
+        snapshot_attempts: int = 5,
+        snapshot_retry_delay: float | None = None,
     ) -> None:
         self._transport = transport
         self._snapshot_attempts = max(1, snapshot_attempts)
-        self._snapshot_retry_delay = max(0.0, snapshot_retry_delay)
+        default_delays = self.SNAPSHOT_RETRY_DELAYS + (
+            (self.SNAPSHOT_RETRY_DELAYS[-1],) * max(0, self._snapshot_attempts - len(self.SNAPSHOT_RETRY_DELAYS))
+        )
+        self._snapshot_retry_delays = (
+            tuple(max(0.0, snapshot_retry_delay) for _ in range(self._snapshot_attempts))
+            if snapshot_retry_delay is not None
+            else default_delays[:self._snapshot_attempts]
+        )
         self._searched_underlyings: set[str] = set()
 
     def require_authenticated_session(self) -> None:
@@ -237,6 +248,12 @@ class IbkrMarketDataProvider:
         if price is None:
             self._raise_market_data_or_incomplete(row, "precio del subyacente")
         return Underlying(symbol.upper(), price)
+
+    def resolve_underlying(self, symbol: str) -> tuple[Underlying, str, tuple[date, ...]]:
+        """Resolve a stock and obtain its price through the canonical snapshot flow."""
+
+        conid, months = self.locate_stock(symbol)
+        return self.get_underlying_by_conid(symbol, conid), conid, months
 
     def get_put_strikes(self, conid: str, expiration: date) -> tuple[float, ...]:
         self._require_derivative_search(conid)
@@ -371,7 +388,7 @@ class IbkrMarketDataProvider:
         underlying_conid: str,
         contract_conid: str,
         *,
-        retry_delays: Sequence[float] = (0.25, 0.5, 1.0, 2.0, 3.0),
+        retry_delays: Sequence[float] | None = None,
     ) -> tuple[DeepSnapshotAttempt, ...]:
         """Captura la evolución de un único snapshot de opción, sin fusionarla.
 
@@ -388,7 +405,8 @@ class IbkrMarketDataProvider:
         for row in rows:
             self._raise_if_unauthorized(row)
         observations.append(DeepSnapshotAttempt("pre-flight", 0, _deep_snapshot_fields(rows, contract_conid)))
-        for attempt, delay in enumerate(retry_delays, 1):
+        delays = self.SNAPSHOT_RETRY_DELAYS if retry_delays is None else retry_delays
+        for attempt, delay in enumerate(delays, 1):
             if delay > 0:
                 time.sleep(delay)
             rows = self._snapshot_request(params)
@@ -421,23 +439,35 @@ class IbkrMarketDataProvider:
             self._raise_if_unauthorized(row)
 
         merged: dict[str, dict[str, Any]] = {}
-        for attempt in range(self._snapshot_attempts):
+        self._merge_snapshot_rows(merged, preflight_rows, conids)
+        for attempt, delay in enumerate(self._snapshot_retry_delays):
             # También se espera después del pre-flight: IBKR documenta que la
             # primera respuesta inicia la suscripción y los datos son asíncronos.
-            if self._snapshot_retry_delay:
-                time.sleep(self._snapshot_retry_delay)
+            if delay:
+                time.sleep(delay)
             rows = self._snapshot_request(params)
             logger.debug("Snapshot intento %d/%d conids=%s: %s", attempt + 1, self._snapshot_attempts, ",".join(conids), [_safe_snapshot_summary(row) for row in rows])
-            for index, row in enumerate(rows):
+            for row in rows:
                 self._raise_if_unauthorized(row)
-                identifier = row.get("conid", row.get("conidEx", conids[index] if index < len(conids) else index))
-                key = str(identifier).split("@", 1)[0]
-                target = merged.setdefault(key, {"conid": key})
-                target.update(row)
+            self._merge_snapshot_rows(merged, rows, conids)
             if self._snapshot_is_ready(merged, conids, ready, fields):
                 break
 
         return tuple(merged.get(str(conid), {}) for conid in conids)
+
+    @staticmethod
+    def _merge_snapshot_rows(
+        merged: dict[str, dict[str, Any]],
+        rows: Sequence[Mapping[str, Any]],
+        conids: Sequence[str],
+    ) -> None:
+        """Accumulate asynchronous partial deliveries, including pre-flight."""
+
+        for index, row in enumerate(rows):
+            identifier = row.get("conid", row.get("conidEx", conids[index] if index < len(conids) else index))
+            key = str(identifier).split("@", 1)[0]
+            target = merged.setdefault(key, {"conid": key})
+            target.update(row)
 
     def _snapshot_request(self, params: Mapping[str, str]) -> tuple[Mapping[str, Any], ...]:
         data = self._transport.get("/iserver/marketdata/snapshot", params)
@@ -488,8 +518,8 @@ class IbkrMarketDataProvider:
 
     # Compatibilidad con el puerto MarketDataProvider y con transportes normalizados.
     def get_underlying(self, symbol: str) -> Underlying:
-        conid, _ = self.locate_stock(symbol)
-        return self.get_underlying_by_conid(symbol, conid)
+        underlying, _, _ = self.resolve_underlying(symbol)
+        return underlying
 
     def get_option_market_data(self, symbol: str) -> tuple[MarketData, ...]:
         """Discover, confirm and quote PUTs without trusting a monthly conid."""

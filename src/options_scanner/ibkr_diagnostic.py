@@ -41,9 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(provider: IbkrMarketDataProvider, symbol: str, expiration: str | None, limit: int, *, output=print) -> None:
     provider.require_authenticated_session()
-    conid, expirations = provider.locate_stock(symbol)
+    underlying, conid, expirations = provider.resolve_underlying(symbol)
     output(f"Ticker: {symbol.upper()} (conid {conid})")
-    underlying = provider.get_underlying_by_conid(symbol, conid)
     output(f"Precio subyacente: {underlying.current_price:g}")
     output("Vencimientos: " + ", ".join(item.strftime("%Y-%m") for item in expirations))
     selected = _select_expiration(expirations, expiration)
