@@ -10,7 +10,11 @@ import time
 from typing import Callable
 
 from options_scanner.filters import safety_margin
-from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
+from options_scanner.ibkr import (
+    ClientPortalTransport,
+    ContractResolutionAccounting,
+    IbkrMarketDataProvider,
+)
 from options_scanner.market_data import FakeMarketDataProvider
 from options_scanner.scanner import PutScanCandidate, build_candidates, rank_candidates, scan_puts
 
@@ -49,7 +53,18 @@ class ScanSummary:
     timeout_phase: str | None = None
     target_contracts: int = 0
     resolved_contracts: int = 0
+    failed_contracts: int = 0
     unresolved_contracts_timeout: int = 0
+    deduplicated_contracts: int = 0
+    with_bid_ask_delta: int = 0
+    with_bid_ask_without_delta: int = 0
+    with_delta_without_bid_ask: int = 0
+    without_bid_ask_delta: int = 0
+    market_data_realtime: int = 0
+    market_data_frozen: int = 0
+    market_data_delayed: int = 0
+    market_data_not_subscribed: int = 0
+    market_data_unknown: int = 0
     phase_seconds: dict[str, float] = field(default_factory=dict)
 
 
@@ -101,29 +116,46 @@ def _ibkr_candidates(
             if safety_margin(underlying.current_price, strike) >= args.min_safety_margin
         )
         stats.rejected_margin += len(all_strikes) - len(strikes)
-        stats.target_contracts += len(strikes)
         finish_phase("dte_margin_filter", phase_started)
         phase_started = clock()
         resolution_progress = (
             (lambda current, total: print(f"Resolviendo contratos {current}/{total}"))
             if show_progress else None
         )
+        resolution_accounting: list[ContractResolutionAccounting] = []
         contracts = provider.discover_put_contracts(
             conid, month, strikes, symbol=args.ticker,
             deadline=discovery_deadline, progress=resolution_progress,
+            accounting=resolution_accounting.append,
             max_workers=getattr(args, "contract_workers", 4),
         )
         for contract in contracts:
             expiration = provider.contract_expiration(contract)
             if args.min_dte <= (expiration - today).days <= args.max_dte:
                 confirmed.append((contract.conid, contract.strike, expiration))
-        stats.resolved_contracts += len(contracts)
+        deadline_reached = clock() >= discovery_deadline
+        if resolution_accounting:
+            account = resolution_accounting[0]
+            stats.target_contracts += account.target
+            stats.resolved_contracts += account.resolved
+            stats.failed_contracts += account.failed
+            stats.unresolved_contracts_timeout += account.unresolved_timeout
+            stats.deduplicated_contracts += account.deduplicated
+        else:  # Compatibility with injected/third-party providers.
+            stats.target_contracts += len(tuple(dict.fromkeys(strikes)))
+            stats.resolved_contracts += len(contracts)
+            remainder = max(0, len(tuple(dict.fromkeys(strikes))) - len(contracts))
+            if deadline_reached:
+                stats.unresolved_contracts_timeout += remainder
+            else:
+                stats.failed_contracts += remainder
         finish_phase("contract_resolution", phase_started)
         phase_started = clock()
-        if expired(discovery_deadline, "contract_resolution"):
-            stats.unresolved_contracts_timeout = max(
-                0, stats.target_contracts - stats.resolved_contracts
-            )
+        # Passing a soft submission deadline is not a partial timeout when all
+        # unique validations reached a terminal state while their futures drained.
+        if deadline_reached and stats.unresolved_contracts_timeout:
+            stats.timed_out = True
+            stats.timeout_phase = "contract_resolution"
             break
 
     stats.considered = len(confirmed)
@@ -149,6 +181,27 @@ def _ibkr_candidates(
     phase_started = clock()
     result: list[PutScanCandidate] = []
     for quote in quotes:
+        has_book = quote.bid is not None and quote.ask is not None
+        has_delta = quote.delta is not None
+        if has_book and has_delta:
+            stats.with_bid_ask_delta += 1
+        elif has_book:
+            stats.with_bid_ask_without_delta += 1
+        elif has_delta:
+            stats.with_delta_without_bid_ask += 1
+        else:
+            stats.without_bid_ask_delta += 1
+        feed = quote.market_data_availability.feed
+        if feed == "RealTime":
+            stats.market_data_realtime += 1
+        elif feed == "Frozen":
+            stats.market_data_frozen += 1
+        elif feed in ("Delayed", "Frozen-Delayed"):
+            stats.market_data_delayed += 1
+        elif feed == "Not Subscribed":
+            stats.market_data_not_subscribed += 1
+        else:
+            stats.market_data_unknown += 1
         expiration = expiration_by_conid[quote.conid]
         candidate = PutScanCandidate(
             args.ticker.upper(), expiration, (expiration - today).days, quote.strike,
@@ -226,7 +279,19 @@ def main() -> None:
             f"timeout_phase={summary.timeout_phase or 'ninguna'} "
             f"contratos_objetivo={summary.target_contracts} "
             f"contratos_resueltos={summary.resolved_contracts} "
-            f"contratos_no_resueltos_timeout={summary.unresolved_contracts_timeout}"
+            f"contratos_fallidos={summary.failed_contracts} "
+            f"contratos_no_resueltos_timeout={summary.unresolved_contracts_timeout} "
+            f"contratos_deduplicados={summary.deduplicated_contracts}\n"
+            "MARKET_DATA: "
+            f"con_bid_ask_delta={summary.with_bid_ask_delta} "
+            f"con_bid_ask_sin_delta={summary.with_bid_ask_without_delta} "
+            f"con_delta_sin_bid_ask={summary.with_delta_without_bid_ask} "
+            f"sin_bid_ask_delta={summary.without_bid_ask_delta} "
+            f"6509_RealTime={summary.market_data_realtime} "
+            f"6509_Frozen={summary.market_data_frozen} "
+            f"6509_Delayed={summary.market_data_delayed} "
+            f"6509_Not_Subscribed={summary.market_data_not_subscribed} "
+            f"6509_desconocido={summary.market_data_unknown}"
         )
         if args.progress:
             labels = (

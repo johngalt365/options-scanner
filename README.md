@@ -152,6 +152,28 @@ se descartan sin mezclarlos con los válidos y únicamente entonces se solicita
 `/iserver/marketdata/snapshot`. Los valores Frozen (`Z`) y Frozen-Delayed (`Y`)
 de `6509` se conservan en el modelo; no se rechazan automáticamente.
 
+En particular, `ZBd` se interpreta como **Frozen** (`Z`) con book disponible
+(`B`); `d` es otra marca del field compuesto y no convierte el feed en
+Delayed. Frozen describe el tipo de datos que IBKR está entregando, mientras
+que `B` indica disponibilidad del book: ninguna de esas marcas garantiza que
+bid, ask o las griegas estén presentes en una entrega asíncrona concreta.
+
+La documentación oficial actual de Client Portal Web API documenta para
+`/iserver/marketdata/snapshot` una primera petición que inicia/prepara la
+suscripción y posteriores peticiones para recibir los fields. No documenta en
+ese endpoint un parámetro ni una operación Client Portal equivalente a
+`reqMarketDataType` de TWS API para seleccionar explícitamente live/frozen.
+Por ello este proyecto conserva el pre-flight read-only ya implementado y no
+inventa una llamada para cambiar el tipo de market data. El tipo efectivo se
+diagnostica exclusivamente con `6509`; permisos y suscripciones siguen siendo
+configuración de la cuenta/usuario y no se modifican desde el scanner.
+
+El resumen productivo separa la resolución contractual en objetivo, resueltos,
+fallidos, no resueltos por timeout y duplicados evitados. Para cada grupo se
+mantiene la invariante `resueltos + fallidos + no_resueltos_timeout == objetivo`.
+También cruza la completitud esencial (bid+ask y delta) con las categorías
+RealTime, Frozen, Delayed, Not Subscribed y desconocida comunicadas por `6509`.
+
 Que una respuesta incluya `31` (last), `7308` (delta) y `7310` (theta), pero no
 bid/ask, IV u open interest, no prueba por sí solo un problema con OPRA: Client
 Portal entrega el snapshot de forma asíncrona y cada field puede estar ausente.
