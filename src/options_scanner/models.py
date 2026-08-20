@@ -106,6 +106,9 @@ class MarketData:
     implied_volatility: float
     volume: int
     open_interest: int
+    # Raw IBKR 6509 value when supplied.  It is intentionally preserved so
+    # policy layers, rather than the provider, decide whether Frozen data is fit.
+    market_data_availability: str | None = None
 
     def __post_init__(self) -> None:
         if self.bid < 0 or self.ask < 0 or self.ask < self.bid:
