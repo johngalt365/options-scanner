@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import date
+import logging
+import time
+from typing import Callable
 
 from options_scanner.filters import safety_margin
 from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
@@ -22,34 +26,99 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--base-url", default="https://localhost:5000/v1/api")
     parser.add_argument("--insecure", action="store_true", help="acepta el certificado TLS local")
     parser.add_argument("--fake", action="store_true", help="usa datos deterministas sin conectar a IBKR")
+    parser.add_argument("--batch-size", type=int, default=50)
+    parser.add_argument("--snapshot-attempts", type=int, default=2)
+    parser.add_argument("--scan-timeout", type=float, default=30.0, help="límite global en segundos")
+    parser.add_argument("--progress", action="store_true", help="muestra progreso del scanner real")
+    parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
 
-def _ibkr_candidates(provider: IbkrMarketDataProvider, args: argparse.Namespace, today: date) -> list[PutScanCandidate]:
+@dataclass(slots=True)
+class ScanSummary:
+    considered: int = 0
+    complete: int = 0
+    incomplete: int = 0
+    rejected_margin: int = 0
+    rejected_delta: int = 0
+    timed_out: bool = False
+
+
+def _ibkr_candidates(
+    provider: IbkrMarketDataProvider,
+    args: argparse.Namespace,
+    today: date,
+    *,
+    summary: ScanSummary | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[PutScanCandidate]:
+    stats = summary if summary is not None else ScanSummary()
+    timeout = getattr(args, "scan_timeout", 30.0)
+    deadline = clock() + max(0.0, timeout)
+    show_progress = getattr(args, "progress", False)
+
+    def expired() -> bool:
+        if clock() >= deadline:
+            stats.timed_out = True
+            return True
+        return False
+
     provider.require_authenticated_session()
-    underlying, conid, months = provider.resolve_underlying(args.ticker)
-    result: list[PutScanCandidate] = []
+    underlying, conid, months = provider.resolve_underlying(args.ticker, deadline=deadline)
+    confirmed: list[tuple[str, float, date]] = []
     for month in months:
+        if expired():
+            break
+        all_strikes = provider.get_put_strikes(conid, month)
         strikes = tuple(
-            strike for strike in provider.get_put_strikes(conid, month)
+            strike for strike in all_strikes
             if safety_margin(underlying.current_price, strike) >= args.min_safety_margin
         )
+        stats.rejected_margin += len(all_strikes) - len(strikes)
         contracts = provider.discover_put_contracts(conid, month, strikes, symbol=args.ticker)
-        by_expiration: dict[date, list[tuple[str, float]]] = {}
         for contract in contracts:
             expiration = provider.contract_expiration(contract)
             if args.min_dte <= (expiration - today).days <= args.max_dte:
-                by_expiration.setdefault(expiration, []).append((contract.conid, contract.strike))
-        for expiration, pairs in by_expiration.items():
-            for quote in provider.get_put_quotes(pairs, expiration):
-                candidate = PutScanCandidate(
-                    args.ticker.upper(), expiration, (expiration - today).days, quote.strike,
-                    underlying.current_price, safety_margin(underlying.current_price, quote.strike),
-                    quote.bid, quote.ask, quote.delta, quote.gamma, quote.theta, quote.vega,
-                    quote.implied_volatility, quote.open_interest, quote.market_data_availability.display,
-                )
-                if quote.delta is None or args.min_abs_delta <= abs(quote.delta) <= args.max_abs_delta:
-                    result.append(candidate)
+                confirmed.append((contract.conid, contract.strike, expiration))
+
+    stats.considered = len(confirmed)
+    if show_progress and confirmed:
+        for index in range(1, len(confirmed) + 1):
+            print(f"Resolviendo contratos {index}/{len(confirmed)}")
+    if not confirmed or expired():
+        stats.incomplete = stats.considered
+        return []
+    expiration_by_conid = {contract_id: expiration for contract_id, _, expiration in confirmed}
+    pairs = tuple((contract_id, strike) for contract_id, strike, _ in confirmed)
+    progress = (lambda current, total: print(f"Market data batch {current}/{total}")) if show_progress else None
+    quotes = provider.get_put_quotes_batched(
+        pairs, today, batch_size=getattr(args, "batch_size", 50),
+        attempts=getattr(args, "snapshot_attempts", 2), deadline=deadline,
+        progress=progress, verbose=getattr(args, "verbose", False),
+    )
+    result: list[PutScanCandidate] = []
+    for quote in quotes:
+        expiration = expiration_by_conid[quote.conid]
+        candidate = PutScanCandidate(
+            args.ticker.upper(), expiration, (expiration - today).days, quote.strike,
+            underlying.current_price, safety_margin(underlying.current_price, quote.strike),
+            quote.bid, quote.ask, quote.delta, quote.gamma, quote.theta, quote.vega,
+            quote.implied_volatility, quote.open_interest, quote.market_data_availability.display,
+        )
+        if quote.delta is None:
+            stats.incomplete += 1
+            result.append(candidate)
+        elif not args.min_abs_delta <= abs(quote.delta) <= args.max_abs_delta:
+            stats.rejected_delta += 1
+        else:
+            result.append(candidate)
+            if candidate.complete:
+                stats.complete += 1
+            else:
+                stats.incomplete += 1
+    # A global timeout can leave whole batches without even a placeholder row.
+    stats.incomplete += max(0, stats.considered - stats.complete - stats.incomplete - stats.rejected_delta)
+    stats.timed_out = stats.timed_out or clock() >= deadline
     return result
 
 
@@ -80,8 +149,13 @@ def main() -> None:
                            max_abs_delta=args.max_abs_delta)
         candidates = build_candidates(provider.get_underlying(args.ticker).current_price, quotes, today)
     else:
-        provider = IbkrMarketDataProvider(ClientPortalTransport(args.base_url, allow_insecure_tls=args.insecure))
-        candidates = _ibkr_candidates(provider, args, today)
+        logging.basicConfig(level=logging.DEBUG if args.verbose else logging.ERROR)
+        provider = IbkrMarketDataProvider(ClientPortalTransport(
+            args.base_url, allow_insecure_tls=args.insecure,
+            timeout=max(0.1, min(10.0, args.scan_timeout)),
+        ))
+        summary = ScanSummary()
+        candidates = _ibkr_candidates(provider, args, today, summary=summary)
     ranked = rank_candidates(candidates)
     print("CANDIDATOS COMPLETOS (ranking por annualized_premium_yield)")
     _print(ranked)
@@ -89,6 +163,13 @@ def main() -> None:
     if incomplete:
         print("\nCANDIDATOS INCOMPLETOS (fuera del ranking)")
         _print(incomplete)
+    if not args.fake:
+        print(
+            "\nRESUMEN: "
+            f"considerados={summary.considered} completos={summary.complete} "
+            f"incompletos={summary.incomplete} rechazados_por_margen={summary.rejected_margin} "
+            f"rechazados_por_delta={summary.rejected_delta} timeout={'sí' if summary.timed_out else 'no'}"
+        )
 
 
 if __name__ == "__main__":

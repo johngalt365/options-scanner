@@ -109,3 +109,80 @@ class ProductiveIbkrScannerTest(TestCase):
             candidates = _ibkr_candidates(provider, self.args(), date(2026, 8, 20))
 
         self.assertEqual(candidates[0].underlying_price, 100.0)
+
+
+class BatchedSnapshotTest(TestCase):
+    class Transport:
+        def __init__(self, deliveries):
+            self.deliveries = iter(deliveries)
+            self.calls = []
+
+        def get(self, path, params):
+            self.calls.append((path, params.copy()))
+            return next(self.deliveries)
+
+    def test_multiple_conids_share_request_and_partial_fields_are_merged(self):
+        transport = self.Transport((
+            [{"conid": 1, "84": "1.0"}, {"conid": 2, "86": "2.2"}],
+            [{"conid": 1, "86": "1.2", "7308": "-.2"},
+             {"conid": 2, "84": "2.0", "7308": "-.25"}],
+        ))
+        provider = IbkrMarketDataProvider(transport, snapshot_retry_delay=0)
+
+        quotes = provider.get_put_quotes_batched(
+            (("1", 80), ("2", 75)), date(2026, 9, 24), attempts=1,
+        )
+
+        self.assertEqual({call[1]["conids"] for call in transport.calls}, {"1,2"})
+        self.assertEqual([(q.bid, q.ask, q.delta) for q in quotes], [(1, 1.2, -.2), (2, 2.2, -.25)])
+
+    def test_optional_iv_and_oi_do_not_delay_or_make_contract_incomplete(self):
+        transport = self.Transport((
+            [{"conid": 1}],
+            [{"conid": 1, "84": "1", "86": "1.2", "7308": "-.2"}],
+        ))
+        quote = IbkrMarketDataProvider(transport, snapshot_retry_delay=0).get_put_quotes_batched(
+            (("1", 80),), date(2026, 9, 24), attempts=4,
+        )[0]
+        row = candidate(bid=quote.bid, ask=quote.ask, delta=quote.delta,
+                        implied_volatility=quote.implied_volatility, open_interest=quote.open_interest)
+        self.assertTrue(row.complete)
+        self.assertIsNone(row.implied_volatility)
+        self.assertEqual(len(transport.calls), 2)
+
+    def test_missing_essential_fields_remains_incomplete(self):
+        for payload in (
+            {"conid": 1, "7308": "-.2"},
+            {"conid": 1, "84": "1", "86": "1.2"},
+        ):
+            transport = self.Transport(([payload], [payload]))
+            quote = IbkrMarketDataProvider(transport, snapshot_retry_delay=0).get_put_quotes_batched(
+                (("1", 80),), date(2026, 9, 24), attempts=1,
+            )[0]
+            self.assertFalse(candidate(bid=quote.bid, ask=quote.ask, delta=quote.delta).complete)
+
+    def test_expired_global_deadline_avoids_market_data(self):
+        transport = self.Transport(())
+        quotes = IbkrMarketDataProvider(transport).get_put_quotes_batched(
+            (("1", 80),), date(2026, 9, 24), deadline=0,
+        )
+        self.assertEqual(quotes[0].conid, "1")
+        self.assertIsNone(quotes[0].bid)
+        self.assertEqual(transport.calls, [])
+
+    def test_batch_ranking_matches_sequential_ranking_for_same_data(self):
+        payload = [
+            {"conid": 1, "84": "1", "86": "1.2", "7308": "-.2"},
+            {"conid": 2, "84": "2", "86": "2.2", "7308": "-.25"},
+        ]
+        batched = IbkrMarketDataProvider(self.Transport((payload, payload)), snapshot_retry_delay=0)
+        batch_quotes = batched.get_put_quotes_batched((("1", 80), ("2", 80)), date(2026, 9, 24), attempts=1)
+        sequential_quotes = []
+        for row, conid in zip(payload, ("1", "2")):
+            provider = IbkrMarketDataProvider(self.Transport(([row], [row])), snapshot_retry_delay=0)
+            sequential_quotes.extend(provider.get_put_quotes_batched(((conid, 80),), date(2026, 9, 24), attempts=1))
+        def ranked(quotes):
+            return [item.bid for item in rank_candidates([
+                candidate(bid=q.bid, ask=q.ask, delta=q.delta) for q in quotes
+            ])]
+        self.assertEqual(ranked(batch_quotes), ranked(sequential_quotes))
