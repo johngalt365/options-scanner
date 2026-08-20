@@ -5,13 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import json
+import logging
 import ssl
-from typing import Any, Mapping, Protocol, Sequence
+import time
+from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from options_scanner.models import MarketData, OptionContract, OptionType, Underlying
+
+
+logger = logging.getLogger(__name__)
 
 
 class IbkrError(RuntimeError):
@@ -93,8 +98,16 @@ class IbkrMarketDataProvider:
 
     SNAPSHOT_FIELDS = "31,84,86,7308,7310,7633,7698"
 
-    def __init__(self, transport: IbkrTransport) -> None:
+    def __init__(
+        self,
+        transport: IbkrTransport,
+        *,
+        snapshot_attempts: int = 3,
+        snapshot_retry_delay: float = 0.1,
+    ) -> None:
         self._transport = transport
+        self._snapshot_attempts = max(1, snapshot_attempts)
+        self._snapshot_retry_delay = max(0.0, snapshot_retry_delay)
 
     def require_authenticated_session(self) -> None:
         data = self._transport.get("/iserver/auth/status", {})
@@ -118,11 +131,24 @@ class IbkrMarketDataProvider:
         return str(row["conid"]), expirations
 
     def get_underlying_by_conid(self, symbol: str, conid: str) -> Underlying:
-        rows = self._snapshot((conid,))
+        rows = self._snapshot(
+            (conid,),
+            ready=lambda row: _number(row, "31") is not None
+            or (_number(row, "84") is not None and _number(row, "86") is not None),
+        )
         if not rows:
             raise IncompleteDataError("IBKR no devolvió el snapshot del subyacente; la respuesta fue parcial o incompleta")
         row = rows[0]
-        price = _number(row, "31", "last", "7295")
+        price = _number(row, "31")
+        if price is None:
+            bid = _number(row, "84")
+            ask = _number(row, "86")
+            if bid is not None and ask is not None:
+                price = (bid + ask) / 2
+                logger.warning(
+                    "IBKR no devolvió last (field 31) para %s; se usa el mid de bid (84) y ask (86)",
+                    symbol.upper(),
+                )
         if price is None:
             self._raise_market_data_or_incomplete(row, "precio del subyacente")
         return Underlying(symbol.upper(), price)
@@ -166,10 +192,56 @@ class IbkrMarketDataProvider:
             ))
         return tuple(quotes)
 
-    def _snapshot(self, conids: Sequence[str]) -> tuple[Mapping[str, Any], ...]:
-        data = self._transport.get("/iserver/marketdata/snapshot", {"conids": ",".join(conids), "fields": self.SNAPSHOT_FIELDS})
+    def _snapshot(
+        self,
+        conids: Sequence[str],
+        *,
+        ready: Callable[[Mapping[str, Any]], bool] | None = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        params = {"conids": ",".join(conids), "fields": self.SNAPSHOT_FIELDS}
+
+        # Client Portal usa la primera llamada como pre-flight para iniciar las
+        # suscripciones. Puede responder únicamente con conid/conidEx.
+        preflight_rows = self._snapshot_request(params)
+        for row in preflight_rows:
+            self._raise_if_unauthorized(row)
+
+        merged: dict[str, dict[str, Any]] = {}
+        for attempt in range(self._snapshot_attempts):
+            if attempt:
+                time.sleep(self._snapshot_retry_delay)
+            rows = self._snapshot_request(params)
+            for index, row in enumerate(rows):
+                self._raise_if_unauthorized(row)
+                identifier = row.get("conid", row.get("conidEx", conids[index] if index < len(conids) else index))
+                key = str(identifier).split("@", 1)[0]
+                merged.setdefault(key, {}).update(row)
+            if self._snapshot_is_ready(merged, conids, ready):
+                break
+
+        return tuple(merged.get(str(conid), {}) for conid in conids)
+
+    def _snapshot_request(self, params: Mapping[str, str]) -> tuple[Mapping[str, Any], ...]:
+        data = self._transport.get("/iserver/marketdata/snapshot", params)
         rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else (data,)
         return tuple(row for row in rows if isinstance(row, Mapping))
+
+    def _snapshot_is_ready(
+        self,
+        rows: Mapping[str, Mapping[str, Any]],
+        conids: Sequence[str],
+        ready: Callable[[Mapping[str, Any]], bool] | None,
+    ) -> bool:
+        fields = self.SNAPSHOT_FIELDS.split(",")
+        return all(
+            str(conid) in rows
+            and (
+                ready(rows[str(conid)])
+                if ready is not None
+                else all(_number(rows[str(conid)], field) is not None for field in fields)
+            )
+            for conid in conids
+        )
 
     @staticmethod
     def _raise_if_unauthorized(row: Mapping[str, Any]) -> None:
