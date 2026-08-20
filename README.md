@@ -12,7 +12,8 @@ src/options_scanner/
 ├── filters.py      # reglas puras, independientes de proveedores
 ├── market_data.py  # puerto MarketDataProvider y FakeMarketDataProvider
 ├── scanner.py      # servicio que orquesta cualquier proveedor
-├── ibkr.py         # adaptador IBKR y transporte inyectable
+├── ibkr.py         # adaptador IBKR y transporte HTTP inyectable
+├── ibkr_diagnostic.py # diagnóstico CLI de Client Portal Gateway
 ├── workspace.py    # espacios en memoria aislados por usuario
 └── brokers.py      # puertos futuros de conexión por usuario
 ```
@@ -21,8 +22,9 @@ src/options_scanner/
 las cotizaciones de opciones. El scanner depende exclusivamente de ese
 protocolo. `FakeMarketDataProvider` ofrece un snapshot determinista de NVDA y
 varias PUTs; `IbkrMarketDataProvider` transforma respuestas de la IBKR Web API
-mediante un `IbkrTransport` inyectado y comprobable con mocks. No se incluye una
-implementación HTTP, autenticación ni llamadas reales a IBKR.
+mediante un `IbkrTransport` inyectado y comprobable con mocks. El transporte
+HTTP no almacena credenciales ni inicia sesiones: reutiliza la
+sesión que el usuario haya abierto externamente en Client Portal Gateway.
 
 `Underlying`, `OptionContract` y `MarketData` son modelos internos inmutables.
 La cotización contempla bid, ask, delta, gamma, theta, vega, volatilidad
@@ -57,9 +59,36 @@ python -m options_scanner.example
 python -m unittest discover -s tests -v
 ```
 
+## Diagnóstico local de IBKR
+
+El diagnóstico es de **solo lectura** y no envía órdenes. Antes de ejecutarlo,
+inicia Client Portal Gateway por separado, completa allí el login de IBKR y
+mantén esa sesión activa. Desde la raíz del repositorio:
+
+```bash
+PYTHONPATH=src python -m options_scanner.ibkr_diagnostic --insecure-tls
+```
+
+`--insecure-tls` acepta explícitamente el certificado local/self-signed y solo
+debe usarse en desarrollo. Sin esa opción se verifica TLS normalmente. La URL
+predeterminada es `https://localhost:5000/v1/api`; se puede cambiar, así como el
+símbolo, mes y número de contratos:
+
+```bash
+PYTHONPATH=src python -m options_scanner.ibkr_diagnostic \
+  --base-url https://localhost:5000/v1/api \
+  --symbol NVDA --expiration 2026-09 --contracts 3 --insecure-tls
+```
+
+El comando localiza el subyacente, muestra su precio y los meses disponibles,
+selecciona un vencimiento, elige strikes PUT cercanos al precio, resuelve sus
+contratos y muestra bid, ask, delta, theta, IV y open interest. `N/D` indica un
+campo parcial/no disponible. Los errores distinguen Gateway inaccesible, sesión
+no autenticada, ticker desconocido, falta de autorización de market data y
+respuestas incompletas. El proyecto y sus tests nunca necesitan hacer una
+llamada real: `IbkrMarketDataProvider` recibe un transporte inyectable.
+
 ## Evolución prevista
 
-Una iteración futura podrá proporcionar un transporte HTTP autenticado para
-IBKR en modo solo lectura, aislado por usuario, sin cambiar el dominio ni el
-scanner. También podrá añadir filtros de liquidez y rentabilidad sobre las
+Una iteración futura podrá añadir filtros de liquidez y rentabilidad sobre las
 métricas ya disponibles.
