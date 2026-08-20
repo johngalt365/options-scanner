@@ -80,6 +80,17 @@ anualizada descendente. Si falta bid, ask o delta, el contrato aparece como
 incompleto en una tabla separada y nunca se inventa un mid. IV, theta y open
 interest se presentan pero no son filtros.
 
+El scanner real reúne primero todos los contratos confirmados que pasan DTE y
+margen, y solicita sus snapshots en batches (50 conids por defecto). Cada batch
+hace un pre-flight y como máximo dos lecturas posteriores, fusionando los
+fields parciales de cada conid. Solo bid, ask y delta son esenciales: gamma,
+theta, vega, IV y open interest se incorporan si llegan, pero no prolongan la
+espera. Se puede ajustar el comportamiento con `--batch-size`,
+`--snapshot-attempts` y `--scan-timeout`; `--progress` muestra el avance y
+`--verbose` habilita los detalles de snapshots incompletos. Al terminar se
+imprime el recuento de considerados, completos, incompletos y rechazados por
+margen o delta.
+
 Para probar exactamente el mismo comando sin Gateway ni datos reales:
 
 ```bash

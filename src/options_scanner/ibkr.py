@@ -225,12 +225,13 @@ class IbkrMarketDataProvider:
             raise IncompleteDataError(f"IBKR no devolvió vencimientos de opciones para {symbol.upper()}")
         return str(row["conid"]), expirations
 
-    def get_underlying_by_conid(self, symbol: str, conid: str) -> Underlying:
+    def get_underlying_by_conid(self, symbol: str, conid: str, *, deadline: float | None = None) -> Underlying:
         rows = self._snapshot(
             (conid,),
             fields=self.UNDERLYING_SNAPSHOT_FIELDS,
             ready=lambda row: _number(row, "31") is not None
             or (_number(row, "84") is not None and _number(row, "86") is not None),
+            deadline=deadline,
         )
         if not rows:
             raise IncompleteDataError("IBKR no devolvió el snapshot del subyacente; la respuesta fue parcial o incompleta")
@@ -249,11 +250,13 @@ class IbkrMarketDataProvider:
             self._raise_market_data_or_incomplete(row, "precio del subyacente")
         return Underlying(symbol.upper(), price)
 
-    def resolve_underlying(self, symbol: str) -> tuple[Underlying, str, tuple[date, ...]]:
+    def resolve_underlying(
+        self, symbol: str, *, deadline: float | None = None
+    ) -> tuple[Underlying, str, tuple[date, ...]]:
         """Resolve a stock and obtain its price through the canonical snapshot flow."""
 
         conid, months = self.locate_stock(symbol)
-        return self.get_underlying_by_conid(symbol, conid), conid, months
+        return self.get_underlying_by_conid(symbol, conid, deadline=deadline), conid, months
 
     def get_put_strikes(self, conid: str, expiration: date) -> tuple[float, ...]:
         self._require_derivative_search(conid)
@@ -353,12 +356,42 @@ class IbkrMarketDataProvider:
         return candidates[0]
 
     def get_put_quotes(self, contracts: Sequence[tuple[str, float]], expiration: date) -> tuple[IbkrOptionQuote, ...]:
-        conids = tuple(conid for conid, _ in contracts)
-        rows = self._snapshot(
-            conids,
-            fields=self.OPTION_SNAPSHOT_FIELDS,
-            ready=lambda row: all(_number(row, field_id) is not None for field_id in self.OPTION_FIELD_IDS.values()),
-        )
+        # Preserve the diagnostic/library behavior of the original public API;
+        # the productive scanner opts out unless --verbose is requested.
+        return self.get_put_quotes_batched(contracts, expiration, verbose=True)
+
+    def get_put_quotes_batched(
+        self,
+        contracts: Sequence[tuple[str, float]],
+        expiration: date,
+        *,
+        batch_size: int = 50,
+        attempts: int = 2,
+        deadline: float | None = None,
+        progress: Callable[[int, int], None] | None = None,
+        verbose: bool = False,
+    ) -> tuple[IbkrOptionQuote, ...]:
+        """Fetch option snapshots in bounded batches, merging partial fields.
+
+        Bid, ask and delta are the only fields that can end the polling early;
+        the remaining greeks, IV and OI are opportunistic display data.
+        """
+        size = max(1, batch_size)
+        batches = [contracts[index:index + size] for index in range(0, len(contracts), size)]
+        rows: list[Mapping[str, Any]] = []
+        for index, batch in enumerate(batches, 1):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            if progress is not None:
+                progress(index, len(batches))
+            conids = tuple(conid for conid, _ in batch)
+            rows.extend(self._snapshot(
+                conids,
+                fields=self.OPTION_SNAPSHOT_FIELDS,
+                ready=lambda row: all(_number(row, field_id) is not None for field_id in ("84", "86", "7308")),
+                attempts=max(1, attempts),
+                deadline=deadline,
+            ))
         by_conid = {str(row.get("conid")): row for row in rows}
         quotes = []
         for conid, strike in contracts:
@@ -366,7 +399,7 @@ class IbkrMarketDataProvider:
             self._raise_if_unauthorized(row)
             statuses = self._option_field_statuses(row)
             missing = [name for name, status in statuses.items() if status is not MarketDataFieldStatus.AVAILABLE]
-            if missing:
+            if missing and verbose:
                 logger.warning(
                     "Snapshot de opción conid=%s incompleto tras pre-flight/reintentos: %s; campos recibidos=%s",
                     conid,
@@ -428,6 +461,8 @@ class IbkrMarketDataProvider:
         *,
         fields: str,
         ready: Callable[[Mapping[str, Any]], bool] | None = None,
+        attempts: int | None = None,
+        deadline: float | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
         params = {"conids": ",".join(conids), "fields": fields}
 
@@ -440,13 +475,22 @@ class IbkrMarketDataProvider:
 
         merged: dict[str, dict[str, Any]] = {}
         self._merge_snapshot_rows(merged, preflight_rows, conids)
-        for attempt, delay in enumerate(self._snapshot_retry_delays):
+        retry_count = self._snapshot_attempts if attempts is None else attempts
+        delays = self._snapshot_retry_delays[:retry_count]
+        for attempt, delay in enumerate(delays):
             # También se espera después del pre-flight: IBKR documenta que la
             # primera respuesta inicia la suscripción y los datos son asíncronos.
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                delay = min(delay, remaining)
             if delay:
                 time.sleep(delay)
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             rows = self._snapshot_request(params)
-            logger.debug("Snapshot intento %d/%d conids=%s: %s", attempt + 1, self._snapshot_attempts, ",".join(conids), [_safe_snapshot_summary(row) for row in rows])
+            logger.debug("Snapshot intento %d/%d conids=%s: %s", attempt + 1, retry_count, ",".join(conids), [_safe_snapshot_summary(row) for row in rows])
             for row in rows:
                 self._raise_if_unauthorized(row)
             self._merge_snapshot_rows(merged, rows, conids)
