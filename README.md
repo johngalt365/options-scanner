@@ -1,7 +1,7 @@
 # Options Scanner
 
-Base inicial, pequeña y modular, para una aplicación personal de análisis de
-opciones financieras. Esta primera fase **no** se conecta a Interactive Brokers
+Base inicial, pequeña y modular, para una aplicación multiusuario de análisis de
+opciones financieras. Esta fase **no** se conecta a Interactive Brokers
 (IBKR) y no incluye interfaz web, base de datos ni infraestructura adicional.
 
 ## Objetivo del MVP
@@ -33,16 +33,38 @@ no constituyen datos de mercado ni una recomendación de inversión.
 ├── src/options_scanner/
 │   ├── models.py       # modelos de dominio: subyacente y contrato
 │   ├── filters.py      # reglas de selección independientes de la fuente de datos
+│   ├── workspace.py    # repositorio en memoria aislado por usuario
+│   ├── brokers.py      # puerto y perfil no sensible para conexiones futuras
 │   ├── sample_data.py  # opciones PUT ficticias de NVDA
 │   └── example.py      # ejemplo ejecutable
-└── tests/
-    └── test_filters.py
+└── tests/               # reglas del scanner y aislamiento multiusuario
 ```
 
 La separación entre modelos, reglas y datos permite sustituir en el futuro los
 datos ficticios por un adaptador de IBKR sin modificar la lógica de filtrado.
 También facilita añadir estrategias y tickers mediante nuevos filtros y
 servicios, manteniendo el núcleo de dominio independiente de proveedores.
+
+## Orientación multiusuario
+
+Los modelos `User`, `Watchlist`, `StrategyParameters` y `SavedScanResult`
+preparan el dominio para que listas, configuraciones y resultados tengan un
+propietario explícito mediante `user_id`. Por ahora `UserWorkspaceStore` los
+guarda únicamente en memoria y crea un espacio separado para cada usuario; no
+es una base de datos ni pretende ofrecer persistencia entre ejecuciones.
+
+El scanner y sus filtros siguen siendo funciones de dominio puras: reciben
+precios, contratos, fechas y parámetros, y no conocen usuarios, sesiones ni
+autenticación. Una capa de aplicación futura podrá leer la configuración del
+workspace, invocar el scanner y guardar el resultado sin acoplar esas reglas al
+modelo multiusuario.
+
+`BrokerConnection` define el puerto para adaptadores futuros y
+`BrokerConnectionProfile` identifica a su propietario sin guardar secretos.
+Cada usuario tendrá su **propia cuenta y su propia sesión de IBKR**. Las
+credenciales y sesiones no se compartirán entre usuarios. En esta fase no hay
+conexión real, almacenamiento de credenciales, login, OAuth, contraseñas, base
+de datos ni frontend.
 
 ## Requisitos e instalación
 
@@ -80,9 +102,10 @@ python -m unittest discover -s tests -v
 
 En iteraciones posteriores se podrán incorporar, de forma incremental:
 
-1. un puerto de datos de mercado y un adaptador real para IBKR cuya primera
+1. un adaptador real para el puerto de IBKR cuya primera
    integración será exclusivamente de lectura, destinada a consultar market
-   data y cadenas de opciones, sin envío de órdenes;
+   data y cadenas de opciones, sin envío de órdenes y con una conexión aislada
+   por usuario;
 2. métricas de theta, volatilidad implícita, liquidez, bid/ask, open interest y
    rentabilidad de la prima;
 3. un sistema de scoring configurable;
