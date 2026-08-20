@@ -86,10 +86,21 @@ hace un pre-flight y como máximo dos lecturas posteriores, fusionando los
 fields parciales de cada conid. Solo bid, ask y delta son esenciales: gamma,
 theta, vega, IV y open interest se incorporan si llegan, pero no prolongan la
 espera. Se puede ajustar el comportamiento con `--batch-size`,
-`--snapshot-attempts` y `--scan-timeout`; `--progress` muestra el avance y
-`--verbose` habilita los detalles de snapshots incompletos. Al terminar se
-imprime el recuento de considerados, completos, incompletos y rechazados por
-margen o delta.
+`--snapshot-attempts` y `--scan-timeout`. Dentro del límite global se reservan
+10 segundos para adquisición mediante `--market-data-timeout`: descubrimiento
+y `secdef/info` no pueden tomar prestada esa reserva, por lo que los snapshots
+no comienzan con un deadline ya agotado. `--progress` muestra el avance real de
+resolución y `Market data batch X/Y`; al final añade tiempos aproximados para
+subyacente, expiraciones/strikes, filtros DTE/margen, confirmación contractual,
+snapshots y filtrado/ranking. El resumen identifica además la fase que agotó
+su presupuesto con `timeout_phase`, y `--progress`/`--verbose` muestran solo
+contadores por endpoint (nunca payloads, cabeceras, cookies o credenciales).
+
+Las respuestas validadas de `secdef/info` y las listas de strikes se reutilizan
+durante la vida del proveedor con claves de subyacente, símbolo, mes y strike.
+Una entrada contractual solo llega a esa caché después de ejecutar y validar
+estrictamente `secdef/info`; la reutilización no convierte una respuesta de
+búsqueda mensual en una confirmación.
 
 Para probar exactamente el mismo comando sin Gateway ni datos reales:
 

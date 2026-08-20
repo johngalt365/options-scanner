@@ -2,8 +2,8 @@ from argparse import Namespace
 from datetime import date
 from unittest import TestCase
 
-from options_scanner.ibkr import IbkrMarketDataProvider
-from options_scanner.scan_puts import _ibkr_candidates
+from options_scanner.ibkr import IbkrMarketDataProvider, IbkrOptionQuote, MarketDataAvailability
+from options_scanner.scan_puts import ScanSummary, _ibkr_candidates
 from options_scanner.scanner import PutScanCandidate, rank_candidates
 
 
@@ -111,6 +111,93 @@ class ProductiveIbkrScannerTest(TestCase):
         self.assertEqual(candidates[0].underlying_price, 100.0)
 
 
+class PhaseBudgetTest(TestCase):
+    class Clock:
+        def __init__(self):
+            self.value = 100.0
+
+        def __call__(self):
+            return self.value
+
+    class Provider:
+        def __init__(self, clock, resolution_seconds=0, market_seconds=0):
+            self.clock = clock
+            self.resolution_seconds = resolution_seconds
+            self.market_seconds = market_seconds
+            self.market_deadline = None
+            self.market_contract_count = 0
+
+        def require_authenticated_session(self):
+            pass
+
+        def resolve_underlying(self, symbol, deadline=None):
+            return type("Underlying", (), {"current_price": 100.0})(), "10", (date(2026, 9, 1),)
+
+        def get_put_strikes(self, conid, month):
+            return tuple(range(50, 75))
+
+        def discover_put_contracts(self, conid, month, strikes, **kwargs):
+            self.clock.value += self.resolution_seconds
+            progress = kwargs.get("progress")
+            if progress:
+                for index in range(1, len(strikes) + 1):
+                    progress(index, len(strikes))
+            return tuple(type("Contract", (), {
+                "conid": str(9000 + strike), "strike": float(strike),
+                "maturity_date": "20260925",
+            })() for strike in strikes)
+
+        @staticmethod
+        def contract_expiration(contract):
+            return date(2026, 9, 25)
+
+        def get_put_quotes_batched(self, contracts, expiration, **kwargs):
+            self.market_contract_count = len(contracts)
+            self.market_deadline = kwargs["deadline"]
+            self.clock.value += self.market_seconds
+            availability = MarketDataAvailability(None, "Unknown", False, False)
+            return tuple(IbkrOptionQuote(
+                conid, strike, date(2026, 9, 25), 1, 1.2, -.2,
+                None, None, None, None, None, availability, {},
+            ) for conid, strike in contracts)
+
+    @staticmethod
+    def args(**changes):
+        values = dict(
+            ticker="NVDA", min_dte=30, max_dte=45, min_safety_margin=.20,
+            min_abs_delta=.15, max_abs_delta=.30, scan_timeout=30,
+            market_data_timeout=10, batch_size=50, snapshot_attempts=2,
+            progress=False, verbose=False,
+        )
+        values.update(changes)
+        return Namespace(**values)
+
+    def test_slow_resolution_cannot_consume_reserved_market_data_budget(self):
+        clock = self.Clock()
+        provider = self.Provider(clock, resolution_seconds=19)
+        summary = ScanSummary()
+        candidates = _ibkr_candidates(provider, self.args(), date(2026, 8, 20), summary=summary, clock=clock)
+        self.assertEqual((len(candidates), provider.market_contract_count), (25, 25))
+        self.assertEqual(provider.market_deadline - clock.value, 10)
+        self.assertFalse(summary.timed_out)
+
+    def test_timeout_during_contract_resolution_is_named(self):
+        clock = self.Clock()
+        provider = self.Provider(clock, resolution_seconds=21)
+        summary = ScanSummary()
+        self.assertEqual(_ibkr_candidates(provider, self.args(), date(2026, 8, 20), summary=summary, clock=clock), [])
+        self.assertEqual(summary.timeout_phase, "contract_resolution")
+        self.assertEqual(provider.market_contract_count, 0)
+
+    def test_timeout_during_market_data_is_named(self):
+        clock = self.Clock()
+        provider = self.Provider(clock, market_seconds=11)
+        summary = ScanSummary()
+        _ibkr_candidates(provider, self.args(), date(2026, 8, 20), summary=summary, clock=clock)
+        self.assertEqual(summary.timeout_phase, "market_data_snapshots")
+        self.assertEqual(provider.market_contract_count, 25)
+
+
 class BatchedSnapshotTest(TestCase):
     class Transport:
         def __init__(self, deliveries):
@@ -186,3 +273,21 @@ class BatchedSnapshotTest(TestCase):
                 candidate(bid=q.bid, ask=q.ask, delta=q.delta) for q in quotes
             ])]
         self.assertEqual(ranked(batch_quotes), ranked(sequential_quotes))
+
+    def test_contract_resolution_cache_reuses_validated_secdef_info(self):
+        contract = [{
+            "conid": 9001, "symbol": "NVDA", "secType": "OPT", "right": "P",
+            "strike": 80, "maturityDate": "20260925",
+        }]
+        transport = self.Transport((
+            [{"symbol": "NVDA", "conid": 10, "sections": [{"secType": "OPT", "months": "SEP26"}]}],
+            contract,
+        ))
+        provider = IbkrMarketDataProvider(transport)
+        conid, months = provider.locate_stock("NVDA")
+        first = provider.discover_put_contracts(conid, months[0], (80,), symbol="NVDA")
+        second = provider.discover_put_contracts(conid, months[0], (80,), symbol="NVDA")
+        self.assertEqual(first, second)
+        info_calls = [path for path, _ in transport.calls if path.endswith("secdef/info")]
+        self.assertEqual(len(info_calls), 1)
+        self.assertEqual(provider.http_call_counts["secdef/info"], 1)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
@@ -202,14 +203,23 @@ class IbkrMarketDataProvider:
             else default_delays[:self._snapshot_attempts]
         )
         self._searched_underlyings: set[str] = set()
+        self._strikes_cache: dict[tuple[str, date], tuple[float, ...]] = {}
+        self._contract_cache: dict[tuple[str, str, date, float], tuple[ConfirmedOptionContract, ...]] = {}
+        self.http_call_counts: Counter[str] = Counter()
+
+    def _get(self, path: str, params: Mapping[str, str]) -> Any:
+        """Count safe endpoint names while leaving request details private."""
+        endpoint = path.rstrip("/").rsplit("/", 2)[-2:]
+        self.http_call_counts["/".join(endpoint)] += 1
+        return self._transport.get(path, params)
 
     def require_authenticated_session(self) -> None:
-        data = self._transport.get("/iserver/auth/status", {})
+        data = self._get("/iserver/auth/status", {})
         if not isinstance(data, Mapping) or not data.get("authenticated"):
             raise NotAuthenticatedError("Client Portal Gateway está disponible, pero la sesión no está autenticada")
 
     def locate_stock(self, symbol: str) -> tuple[str, tuple[date, ...]]:
-        data = self._transport.get("/iserver/secdef/search", {"symbol": symbol.upper(), "secType": "STK"})
+        data = self._get("/iserver/secdef/search", {"symbol": symbol.upper(), "secType": "STK"})
         rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else []
         row = next((item for item in rows if isinstance(item, Mapping) and str(item.get("symbol", "")).upper() == symbol.upper()), None)
         if row is None or row.get("conid") is None:
@@ -260,13 +270,17 @@ class IbkrMarketDataProvider:
 
     def get_put_strikes(self, conid: str, expiration: date) -> tuple[float, ...]:
         self._require_derivative_search(conid)
-        data = self._transport.get("/iserver/secdef/strikes", {
+        key = (str(conid), expiration)
+        if key in self._strikes_cache:
+            return self._strikes_cache[key]
+        data = self._get("/iserver/secdef/strikes", {
             "conid": conid, "secType": "OPT", "month": _format_ibkr_month(expiration), "exchange": "SMART",
         })
         values = data.get("put", ()) if isinstance(data, Mapping) else ()
         strikes = tuple(float(value) for value in values)
         if not strikes:
             raise IncompleteDataError("IBKR no devolvió strikes PUT para el vencimiento seleccionado")
+        self._strikes_cache[key] = strikes
         return strikes
 
     def get_put_contracts(self, conid: str, expiration: date, strikes: Sequence[float], *, symbol: str) -> tuple[tuple[str, float], ...]:
@@ -288,24 +302,39 @@ class IbkrMarketDataProvider:
         return tuple(contracts)
 
     def discover_put_contracts(
-        self, conid: str, month: date, strikes: Sequence[float], *, symbol: str
+        self, conid: str, month: date, strikes: Sequence[float], *, symbol: str,
+        deadline: float | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> tuple[ConfirmedOptionContract, ...]:
         """Descubre vencimientos exactos y conserva solo identidades PUT válidas."""
         self._require_derivative_search(conid)
         confirmed: dict[str, ConfirmedOptionContract] = {}
-        for strike in strikes:
-            data = self._transport.get("/iserver/secdef/info", {
-                "conid": conid, "secType": "OPT", "month": _format_ibkr_month(month),
-                "exchange": "SMART", "strike": str(strike), "right": "P",
-            })
-            rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else ()
-            for row in rows:
-                if not isinstance(row, Mapping) or row.get("conid") is None:
-                    continue
-                candidate = _confirmed_option(row)
-                exact = _parse_maturity_date(candidate.maturity_date)
-                if exact is not None and _contract_matches(candidate, symbol, month, strike, candidate.maturity_date):
-                    confirmed[candidate.conid] = candidate
+        for index, strike in enumerate(strikes, 1):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            key = (str(conid), symbol.upper(), month, float(strike))
+            candidates = self._contract_cache.get(key)
+            if candidates is None:
+                data = self._get("/iserver/secdef/info", {
+                    "conid": conid, "secType": "OPT", "month": _format_ibkr_month(month),
+                    "exchange": "SMART", "strike": str(strike), "right": "P",
+                })
+                rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else ()
+                found = []
+                for row in rows:
+                    if not isinstance(row, Mapping) or row.get("conid") is None:
+                        continue
+                    candidate = _confirmed_option(row)
+                    exact = _parse_maturity_date(candidate.maturity_date)
+                    if exact is not None and _contract_matches(candidate, symbol, month, strike, candidate.maturity_date):
+                        found.append(candidate)
+                candidates = tuple(found)
+                # Cache only the result of a real secdef/info validation.
+                self._contract_cache[key] = candidates
+            for candidate in candidates:
+                confirmed[candidate.conid] = candidate
+            if progress is not None:
+                progress(index, len(strikes))
         return tuple(confirmed.values())
 
     @staticmethod
@@ -331,7 +360,7 @@ class IbkrMarketDataProvider:
         """
 
         self._require_derivative_search(underlying_conid)
-        data = self._transport.get("/iserver/secdef/info", {
+        data = self._get("/iserver/secdef/info", {
             "conid": str(underlying_conid), "secType": "OPT",
             "month": _format_ibkr_month(expiration), "exchange": "SMART",
             "strike": str(strike), "right": "P",
@@ -514,7 +543,7 @@ class IbkrMarketDataProvider:
             target.update(row)
 
     def _snapshot_request(self, params: Mapping[str, str]) -> tuple[Mapping[str, Any], ...]:
-        data = self._transport.get("/iserver/marketdata/snapshot", params)
+        data = self._get("/iserver/marketdata/snapshot", params)
         rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else (data,)
         return tuple(row for row in rows if isinstance(row, Mapping))
 
