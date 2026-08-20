@@ -13,7 +13,7 @@ from options_scanner.ibkr import (
     NotAuthenticatedError,
     TickerNotFoundError,
 )
-from options_scanner.ibkr_diagnostic import main, run
+from options_scanner.ibkr_diagnostic import _display_deep_attempt, main, run
 
 
 class FakeTransport:
@@ -42,6 +42,41 @@ class FakeTransport:
 
 
 class DiagnosticTest(TestCase):
+    def test_deep_snapshot_preserves_preflight_partial_and_later_fields(self):
+        class TemporalTransport:
+            def __init__(self):
+                self.responses = [
+                    [{"conidEx": "101@SMART", "server_id": "must-not-leak"}],
+                    [{"conid": 101, "31": "1.15", "6509": "RpBd", "84": "N/A"}],
+                    [{"conid": 101, "84": "1.10", "86": "1.20", "7633": "0.32", "7638": "11500"}],
+                ]
+                self.calls = []
+
+            def get(self, path, params):
+                self.calls.append((path, params.copy()))
+                return self.responses.pop(0)
+
+        transport = TemporalTransport()
+        provider = IbkrMarketDataProvider(transport)
+        provider._searched_underlyings.add("4815747")
+        observations = provider.diagnose_put_contract("4815747", "101", retry_delays=(0, 0))
+
+        self.assertEqual([item.phase for item in observations], ["pre-flight", "snapshot", "snapshot"])
+        self.assertEqual(observations[0].fields, {})
+        self.assertEqual(observations[1].fields, {"31": "1.15", "6509": "RpBd", "84": "N/A"})
+        self.assertEqual(observations[2].fields["7633"], "0.32")
+        self.assertNotIn("server_id", observations[0].fields)
+        self.assertTrue(all(call[1]["fields"] == provider.DEEP_OPTION_SNAPSHOT_FIELDS for call in transport.calls))
+        partial = _display_deep_attempt(observations[1])
+        self.assertIn("84=field recibido con valor N/A", partial)
+        self.assertIn("86=field no recibido", partial)
+        self.assertIn("6509=RpBd (RealTime, book disponible)", partial)
+
+    def test_deep_snapshot_requires_prior_secdef_search(self):
+        provider = IbkrMarketDataProvider(FakeTransport())
+        with self.assertRaisesRegex(IncompleteDataError, "secdef/search"):
+            provider.diagnose_put_contract("4815747", "101", retry_delays=())
+
     def test_option_snapshot_repeats_preflight_and_merges_delayed_partial_data(self):
         class DelayedTransport:
             def __init__(self):

@@ -111,6 +111,29 @@ valores recibidos (y clasifica los mensajes de IBKR), sin cabeceras, cookies ni
 credenciales. El proyecto y sus tests nunca necesitan hacer una llamada real:
 `IbkrMarketDataProvider` recibe un transporte inyectable.
 
+### Diagnóstico profundo de un solo contrato
+
+Para observar la evolución temporal de **un único PUT** sin cambiar el scanner
+ni sus suscripciones, indica mes y strike exactos. El modo ejecuta primero
+`/iserver/secdef/search`, resuelve ese contrato, hace el pre-flight y realiza
+cinco snapshots adicionales con esperas crecientes (0,25; 0,5; 1; 2 y 3 s):
+
+```bash
+PYTHONPATH=src python -m options_scanner.ibkr_diagnostic \
+  --deep --symbol NVDA --expiration 2026-09 --strike 100 --insecure-tls
+```
+
+La salida identifica el conid, vencimiento y strike, y para cada entrega
+muestra exclusivamente los fields `31,84,86,6509,7308,7310,7633,7638`. Indica
+por separado `field no recibido` y `field recibido con valor N/A`, por lo que se
+puede comprobar si bid (`84`), ask (`86`) o IV (`7633`) aparecen más tarde. El
+valor `6509` se interpreta conservadoramente: `RpBd` significa `RealTime` y
+book disponible y **no** se convierte en una inferencia de falta de
+suscripción. Delta y theta se muestran como valores crudos de diagnóstico, no
+como datos fiables para decidir. No se imprimen respuestas arbitrarias,
+cookies, cabeceras o credenciales, y este modo no contiene operaciones de
+órdenes.
+
 ## Evolución prevista
 
 Una iteración futura podrá añadir filtros de liquidez y rentabilidad sobre las
