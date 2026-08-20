@@ -77,16 +77,20 @@ símbolo, mes y número de contratos:
 ```bash
 PYTHONPATH=src python -m options_scanner.ibkr_diagnostic \
   --base-url https://localhost:5000/v1/api \
-  --symbol NVDA --expiration 2026-09 --contracts 3 --insecure-tls
+  --symbol NVDA --expiration 2026-09 --contracts 3 --insecure-tls --verbose
 ```
 
 El comando localiza el subyacente, muestra su precio y los meses disponibles,
 selecciona un vencimiento, elige strikes PUT cercanos al precio, resuelve sus
-contratos y muestra bid, ask, delta, theta, IV y open interest. `N/D` indica un
-campo parcial/no disponible. Los errores distinguen Gateway inaccesible, sesión
-no autenticada, ticker desconocido, falta de autorización de market data y
-respuestas incompletas. El proyecto y sus tests nunca necesitan hacer una
-llamada real: `IbkrMarketDataProvider` recibe un transporte inyectable.
+contratos y muestra bid, ask, delta, theta, IV y open interest. Los snapshots de
+opciones usan los field IDs 84, 86, 7308, 7310, 7633 y 7698, respectivamente,
+y realizan un pre-flight seguido de reintentos porque la entrega es asíncrona.
+Un `N/D` lleva su causa: pendiente después del pre-flight, campo marcado como no
+disponible por IBKR o respuesta parcial. La falta de suscripción/permisos genera
+un error específico. `--verbose` registra por intento solo conid, field IDs y
+valores recibidos (y clasifica los mensajes de IBKR), sin cabeceras, cookies ni
+credenciales. El proyecto y sus tests nunca necesitan hacer una llamada real:
+`IbkrMarketDataProvider` recibe un transporte inyectable.
 
 ## Evolución prevista
 

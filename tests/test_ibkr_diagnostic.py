@@ -9,6 +9,7 @@ from options_scanner.ibkr import (
     IbkrMarketDataProvider,
     IncompleteDataError,
     MarketDataUnauthorizedError,
+    MarketDataFieldStatus,
     NotAuthenticatedError,
     TickerNotFoundError,
 )
@@ -41,6 +42,51 @@ class FakeTransport:
 
 
 class DiagnosticTest(TestCase):
+    def test_option_snapshot_repeats_preflight_and_merges_delayed_partial_data(self):
+        class DelayedTransport:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, path, params):
+                self.calls.append((path, params.copy()))
+                responses = [
+                    [{"conidEx": "101@SMART"}, {"conidEx": "102@SMART"}],
+                    [{"conid": 101, "84": "C1.10", "86": "1.20"}, {"conid": 102, "84": "2.10"}],
+                    [{"conid": 101, "7308": "-0.25", "7310": "-0.04", "7633": "32%", "7698": "1.2K"},
+                     {"conid": 102, "86": "2.20", "7308": "-0.30", "7310": "-0.05", "7633": "0.35", "7698": 900}],
+                ]
+                return responses[len(self.calls) - 1]
+
+        transport = DelayedTransport()
+        quotes = IbkrMarketDataProvider(transport, snapshot_attempts=2, snapshot_retry_delay=0).get_put_quotes(
+            (("101", 100.0), ("102", 95.0)), __import__("datetime").date(2026, 9, 1)
+        )
+
+        self.assertEqual(len(transport.calls), 3)  # pre-flight + dos entregas diferidas
+        self.assertTrue(all(call[1]["fields"] == "84,86,7308,7310,7633,7698" for call in transport.calls))
+        self.assertEqual((quotes[0].bid, quotes[0].implied_volatility, quotes[0].open_interest), (1.1, 32.0, 1200))
+        self.assertEqual(quotes[1].ask, 2.2)
+        self.assertTrue(all(status is MarketDataFieldStatus.AVAILABLE for quote in quotes for status in quote.field_statuses.values()))
+
+    def test_option_snapshot_classifies_not_ready_unavailable_and_partial(self):
+        class IncompleteTransport:
+            def __init__(self): self.calls = 0
+            def get(self, path, params):
+                self.calls += 1
+                if self.calls == 1:
+                    return [{"conid": 101}, {"conid": 102}, {"conid": 103}]
+                return [{"conid": 101}, {"conid": 102, "84": "N/A"}, {"conid": 103, "84": "1.0"}]
+
+        with self.assertLogs("options_scanner.ibkr", level="WARNING") as logs:
+            quotes = IbkrMarketDataProvider(IncompleteTransport(), snapshot_attempts=1, snapshot_retry_delay=0).get_put_quotes(
+                (("101", 100.0), ("102", 99.0), ("103", 98.0)), __import__("datetime").date(2026, 9, 1)
+            )
+
+        self.assertIs(quotes[0].field_statuses["bid"], MarketDataFieldStatus.NOT_READY)
+        self.assertIs(quotes[1].field_statuses["bid"], MarketDataFieldStatus.UNAVAILABLE)
+        self.assertIs(quotes[2].field_statuses["ask"], MarketDataFieldStatus.PARTIAL_RESPONSE)
+        self.assertIn("campos recibidos", " ".join(logs.output))
+
     def test_underlying_snapshot_repeats_after_conid_only_preflight(self):
         class PreflightTransport:
             def __init__(self):

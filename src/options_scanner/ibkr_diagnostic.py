@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
+import logging
 import sys
 
-from options_scanner.ibkr import ClientPortalTransport, IbkrError, IbkrMarketDataProvider
+from options_scanner.ibkr import ClientPortalTransport, IbkrError, IbkrMarketDataProvider, MarketDataFieldStatus
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,6 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--insecure-tls", action="store_true", help="acepta explícitamente el certificado local/self-signed (solo desarrollo)")
     parser.add_argument("--expiration", help="mes YYYY-MM; por defecto selecciona el primero disponible")
     parser.add_argument("--contracts", type=int, default=3, help="número máximo de strikes/contratos")
+    parser.add_argument("--verbose", action="store_true", help="muestra el resumen seguro de cada respuesta snapshot")
     return parser
 
 
@@ -35,8 +37,14 @@ def run(provider: IbkrMarketDataProvider, symbol: str, expiration: str | None, l
     output(f"Contratos PUT encontrados: {len(contracts)}")
     output("conid | strike | bid | ask | delta | theta | IV | open interest")
     for quote in provider.get_put_quotes(contracts, selected):
-        values = (quote.conid, quote.strike, quote.bid, quote.ask, quote.delta, quote.theta, quote.implied_volatility, quote.open_interest)
-        output(" | ".join(_display(value) for value in values))
+        values = ((quote.conid, None), (quote.strike, None)) + tuple(
+            (getattr(quote, attribute), quote.field_statuses[name])
+            for attribute, name in (
+                ("bid", "bid"), ("ask", "ask"), ("delta", "delta"), ("theta", "theta"),
+                ("implied_volatility", "implied_volatility"), ("open_interest", "open_interest"),
+            )
+        )
+        output(" | ".join(_display(value, status) for value, status in values))
 
 
 def _select_expiration(expirations: tuple[date, ...], requested: str | None) -> date:
@@ -52,12 +60,21 @@ def _select_expiration(expirations: tuple[date, ...], requested: str | None) -> 
     return wanted
 
 
-def _display(value: object | None) -> str:
-    return "N/D" if value is None else f"{value:g}" if isinstance(value, float) else str(value)
+def _display(value: object | None, status: MarketDataFieldStatus | None = None) -> str:
+    if value is not None:
+        return f"{value:g}" if isinstance(value, float) else str(value)
+    labels = {
+        MarketDataFieldStatus.NOT_READY: "pendiente tras pre-flight",
+        MarketDataFieldStatus.UNAVAILABLE: "campo no disponible",
+        MarketDataFieldStatus.PARTIAL_RESPONSE: "respuesta parcial",
+    }
+    return f"N/D ({labels[status]})" if status in labels else "N/D"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
     provider = IbkrMarketDataProvider(ClientPortalTransport(args.base_url, allow_insecure_tls=args.insecure_tls))
     try:
         run(provider, args.symbol, args.expiration, args.contracts)
