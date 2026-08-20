@@ -28,6 +28,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--fake", action="store_true", help="usa datos deterministas sin conectar a IBKR")
     parser.add_argument("--batch-size", type=int, default=50)
     parser.add_argument("--snapshot-attempts", type=int, default=2)
+    parser.add_argument("--contract-workers", type=int, default=4,
+                        help="máximo de secdef/info simultáneos (máximo de seguridad: 16)")
     parser.add_argument("--scan-timeout", type=float, default=30.0, help="límite global en segundos")
     parser.add_argument("--market-data-timeout", type=float, default=10.0,
                         help="presupuesto reservado para snapshots dentro del límite global")
@@ -45,6 +47,9 @@ class ScanSummary:
     rejected_delta: int = 0
     timed_out: bool = False
     timeout_phase: str | None = None
+    target_contracts: int = 0
+    resolved_contracts: int = 0
+    unresolved_contracts_timeout: int = 0
     phase_seconds: dict[str, float] = field(default_factory=dict)
 
 
@@ -96,6 +101,7 @@ def _ibkr_candidates(
             if safety_margin(underlying.current_price, strike) >= args.min_safety_margin
         )
         stats.rejected_margin += len(all_strikes) - len(strikes)
+        stats.target_contracts += len(strikes)
         finish_phase("dte_margin_filter", phase_started)
         phase_started = clock()
         resolution_progress = (
@@ -105,18 +111,22 @@ def _ibkr_candidates(
         contracts = provider.discover_put_contracts(
             conid, month, strikes, symbol=args.ticker,
             deadline=discovery_deadline, progress=resolution_progress,
+            max_workers=getattr(args, "contract_workers", 4),
         )
         for contract in contracts:
             expiration = provider.contract_expiration(contract)
             if args.min_dte <= (expiration - today).days <= args.max_dte:
                 confirmed.append((contract.conid, contract.strike, expiration))
+        stats.resolved_contracts += len(contracts)
         finish_phase("contract_resolution", phase_started)
         phase_started = clock()
+        if expired(discovery_deadline, "contract_resolution"):
+            stats.unresolved_contracts_timeout = max(
+                0, stats.target_contracts - stats.resolved_contracts
+            )
+            break
 
     stats.considered = len(confirmed)
-    if stats.timed_out or expired(discovery_deadline, "contract_resolution"):
-        stats.incomplete = stats.considered
-        return []
     if not confirmed:
         return []
 
@@ -213,7 +223,10 @@ def main() -> None:
             f"considerados={summary.considered} completos={summary.complete} "
             f"incompletos={summary.incomplete} rechazados_por_margen={summary.rejected_margin} "
             f"rechazados_por_delta={summary.rejected_delta} timeout={'sí' if summary.timed_out else 'no'} "
-            f"timeout_phase={summary.timeout_phase or 'ninguna'}"
+            f"timeout_phase={summary.timeout_phase or 'ninguna'} "
+            f"contratos_objetivo={summary.target_contracts} "
+            f"contratos_resueltos={summary.resolved_contracts} "
+            f"contratos_no_resueltos_timeout={summary.unresolved_contracts_timeout}"
         )
         if args.progress:
             labels = (
@@ -222,7 +235,10 @@ def main() -> None:
             )
             print("TIEMPOS: " + " ".join(f"{name}={summary.phase_seconds.get(name, 0.0):.3f}s" for name in labels))
         if args.progress or args.verbose:
-            endpoints = ("secdef/search", "secdef/strikes", "secdef/info", "marketdata/snapshot")
+            endpoints = (
+                "secdef/search", "secdef/strikes", "secdef/info", "marketdata/snapshot",
+                "marketdata/snapshot/underlying", "marketdata/snapshot/options",
+            )
             print("HTTP: " + " ".join(f"{name}={provider.http_call_counts[name]}" for name in endpoints))
 
 
