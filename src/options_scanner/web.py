@@ -406,8 +406,9 @@ def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
     period = context.period.value if context else result.summary.historical_period
     period_labels = {"3m": "3M", "6m": "6M", "1y": "1A", "multi": "Multi"}
     current = context.current_price if context else result.underlying_price
-    display_context = (context.horizon_contexts[-1] if context and context.period == HistoricalPeriod.MULTI
-                       and context.horizon_contexts else context)
+    display_context = context
+    if context and context.period == HistoricalPeriod.MULTI and context.horizon_contexts:
+        display_context = next((item for item in reversed(context.horizon_contexts) if item.bars), context)
     supports = display_context.supports_below_price[:3] if display_context else ()
     resistances = display_context.resistances_above_price[:2] if display_context else ()
 
@@ -436,6 +437,13 @@ def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
         f'<div><dt>Última sesión disponible</dt><dd>{last_session}</dd></div></dl>'
     )
     if context and context.period == HistoricalPeriod.MULTI:
+        labels = {HistoricalPeriod.THREE_MONTHS: "3M", HistoricalPeriod.SIX_MONTHS: "6M",
+                  HistoricalPeriod.ONE_YEAR: "1A"}
+        horizon_status = " · ".join(
+            f'{labels[item.period]} {"✓" if item.bars else "sin datos"}'
+            for item in context.horizon_contexts
+        )
+        summary += f'<p class="horizon-status" role="status">{horizon_status}</p>'
         cards = []
         for item in context.confluences:
             title = "Soporte" if item.kind.value == "support" else "Resistencia"
@@ -445,8 +453,11 @@ def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
             cards.append(f'<details class="confluence"><summary>{title} ${item.lower:.2f}–${item.upper:.2f} '
                          f'· {len(item.origins)}/3 horizontes</summary><ul>{origins}</ul>'
                          f'<p>Distancia al precio: {item.distance_percent:+.2f} %</p></details>')
+        available_horizons = sum(bool(item.bars) for item in context.horizon_contexts)
+        empty_confluence = ('<p>No hay suficientes horizontes para determinar confluencia.</p>'
+                             if available_horizons < 2 else '<p>Sin confluencia</p>')
         summary += ('<div class="confluence-summary"><h3>Confluencias</h3>' +
-                    ("".join(cards) if cards else '<p>Sin confluencia</p>') + '</div>')
+                    ("".join(cards) if cards else empty_confluence) + '</div>')
     if context is None or not context.bars:
         return f'<section class="technical">{summary}<div class="history-unavailable" role="status"><strong>Histórico no disponible</strong><p>IBKR no devolvió barras históricas utilizables. El scan de opciones no se ha visto afectado.</p></div></section>'
 

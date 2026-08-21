@@ -229,6 +229,10 @@ def build_multi_technical_context(symbol, histories, current_price, strikes=(), 
                                              current_price, strikes, window=window, atr_period=atr_period)
                      for period in periods)
     confluences = find_confluences(contexts, current_price)
-    bars = tuple(histories.get(HistoricalPeriod.ONE_YEAR, ()))
+    # Use the longest *available* horizon for the combined chart and visible
+    # zones. A missing 1A response must not hide valid 3M/6M analysis.
+    available = tuple(context for context in contexts if context.bars)
+    display = available[-1] if available else None
+    bars = display.bars if display else ()
     return TechnicalContext(symbol, HistoricalPeriod.MULTI, bars, current_price, (), (), (), None, None,
                             None, None, (), contexts, confluences)

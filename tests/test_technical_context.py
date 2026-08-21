@@ -25,6 +25,23 @@ class TechnicalTest(TestCase):
         self.assertEqual((result[0].open,result[0].volume),(10,123))
         self.assertEqual(transport.calls[-1],("/iserver/marketdata/history",{"conid":"42","period":"6m","bar":"1d","outsideRth":"true"}))
 
+    def test_each_multi_horizon_uses_the_validated_request_and_reused_conid(self):
+        transport = Transport()
+        resolved = []
+        provider = IbkrHistoricalDataProvider(
+            transport, lambda symbol: resolved.append(symbol) or "265598"
+        )
+        for period in (HistoricalPeriod.THREE_MONTHS, HistoricalPeriod.SIX_MONTHS,
+                       HistoricalPeriod.ONE_YEAR):
+            provider.get_historical_bars("AEHR", period)
+        self.assertEqual(resolved, ["AEHR", "AEHR", "AEHR"])
+        self.assertEqual(transport.calls, [
+            ("/iserver/marketdata/history", {
+                "conid": "265598", "period": period.value, "bar": "1d", "outsideRth": "true",
+            }) for period in (HistoricalPeriod.THREE_MONTHS, HistoricalPeriod.SIX_MONTHS,
+                              HistoricalPeriod.ONE_YEAR)
+        ])
+
     def test_mapping_skips_malformed_rows(self):
         self.assertEqual(len(map_ibkr_historical_bars({"data":[{"bad":1},{"t":"2026-01-02","o":1,"h":2,"l":.5,"c":1}]})),1)
 
