@@ -19,6 +19,15 @@ class StrikePosition(StrEnum):
     BELOW = BELOW_SUPPORT
 
 
+class ConfluenceStrikePosition(StrEnum):
+    """Canonical strike classification used by every Multi presentation."""
+
+    ABOVE = "Sobre confluencia"
+    INSIDE = "Dentro de confluencia"
+    BELOW = "Bajo confluencia"
+    NONE = "Sin confluencia relevante"
+
+
 class SupportProximity(StrEnum):
     """Descriptive price position relative to the upper edge of S1."""
 
@@ -87,6 +96,11 @@ class TechnicalConfluence:
     def periods(self) -> tuple[HistoricalPeriod, ...]:
         return tuple(origin.period for origin in self.origins)
 
+    @property
+    def participating_horizons(self) -> tuple[HistoricalPeriod, ...]:
+        """Horizons whose zones form this particular intersection."""
+        return self.periods
+
     def classify_strike(self, strike: float) -> str:
         if strike > self.upper:
             return "por encima"
@@ -101,17 +115,47 @@ class ConfluenceStrikeContext:
 
     strike: float
     confluence: TechnicalConfluence | None
-    position_label: str
+    position: ConfluenceStrikePosition
     distance_percent: float | None
+    requested_horizons: tuple[HistoricalPeriod, ...] = ()
+    available_horizons: tuple[HistoricalPeriod, ...] = ()
+
+    @property
+    def position_label(self) -> str:
+        return self.position.value
+
+    @property
+    def participating_horizons(self) -> tuple[HistoricalPeriod, ...]:
+        return self.confluence.participating_horizons if self.confluence else ()
+
+    @property
+    def horizon_ratio(self) -> str:
+        return f"{len(self.participating_horizons)}/{len(self.requested_horizons)}"
+
+    def explanation(self) -> str:
+        """Detailed text derived from the same classification used in tables."""
+        if self.confluence is None:
+            return f"Strike ${self.strike:.2f} sin confluencia relevante."
+        relation = {
+            ConfluenceStrikePosition.ABOVE: "sobre",
+            ConfluenceStrikePosition.INSIDE: "dentro de",
+            ConfluenceStrikePosition.BELOW: "bajo",
+        }[self.position]
+        item = self.confluence
+        return (f"Strike ${self.strike:.2f} {relation} confluencia de soporte "
+                f"${item.lower:.2f}–${item.upper:.2f} · {self.horizon_ratio} horizontes.")
 
 
 def classify_strike_against_confluences(
-    strike: float, confluences: tuple[TechnicalConfluence, ...] | list[TechnicalConfluence]
+    strike: float, confluences: tuple[TechnicalConfluence, ...] | list[TechnicalConfluence],
+    *, requested_horizons: tuple[HistoricalPeriod, ...] = (),
+    available_horizons: tuple[HistoricalPeriod, ...] = (),
 ) -> ConfluenceStrikeContext:
     """Select the nearest support confluence without affecting detection or ranking."""
     supports = tuple(item for item in confluences if item.kind == ZoneType.SUPPORT)
     if not supports:
-        return ConfluenceStrikeContext(strike, None, "Sin confluencia relevante", None)
+        return ConfluenceStrikeContext(strike, None, ConfluenceStrikePosition.NONE, None,
+                                       requested_horizons, available_horizons)
     containing = next((item for item in supports if item.lower <= strike <= item.upper), None)
     relevant = containing or min(
         supports,
@@ -120,11 +164,14 @@ def classify_strike_against_confluences(
     )
     if strike > relevant.upper:
         distance = (strike - relevant.upper) / relevant.upper * 100
-        return ConfluenceStrikeContext(strike, relevant, "Sobre confluencia", distance)
+        return ConfluenceStrikeContext(strike, relevant, ConfluenceStrikePosition.ABOVE, distance,
+                                       requested_horizons, available_horizons)
     if strike < relevant.lower:
         distance = (strike - relevant.lower) / relevant.lower * 100
-        return ConfluenceStrikeContext(strike, relevant, "Bajo confluencia", distance)
-    return ConfluenceStrikeContext(strike, relevant, "Dentro de confluencia", 0.0)
+        return ConfluenceStrikeContext(strike, relevant, ConfluenceStrikePosition.BELOW, distance,
+                                       requested_horizons, available_horizons)
+    return ConfluenceStrikeContext(strike, relevant, ConfluenceStrikePosition.INSIDE, 0.0,
+                                   requested_horizons, available_horizons)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +190,15 @@ class TechnicalContext:
     strikes: tuple[StrikeContext, ...]
     horizon_contexts: tuple["TechnicalContext", ...] = field(default=())
     confluences: tuple[TechnicalConfluence, ...] = field(default=())
+    requested_horizons: tuple[HistoricalPeriod, ...] = field(default=())
+    available_horizons: tuple[HistoricalPeriod, ...] = field(default=())
+
+    def classify_strike_against_confluence(self, strike: float) -> ConfluenceStrikeContext:
+        """Return the single canonical Multi strike/confluence interpretation."""
+        return classify_strike_against_confluences(
+            strike, self.confluences, requested_horizons=self.requested_horizons,
+            available_horizons=self.available_horizons,
+        )
 
 
 def classify_strike_against_zones(
@@ -267,4 +323,5 @@ def build_multi_technical_context(symbol, histories, current_price, strikes=(), 
     display = available[-1] if available else None
     bars = display.bars if display else ()
     return TechnicalContext(symbol, HistoricalPeriod.MULTI, bars, current_price, (), (), (), None, None,
-                            None, None, (), contexts, confluences)
+                            None, None, (), contexts, confluences, periods,
+                            tuple(context.period for context in available))
