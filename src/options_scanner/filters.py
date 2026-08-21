@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 from datetime import date
 
-from options_scanner.models import MarketData, OptionType, Underlying
+from options_scanner.models import MarketData, OptionType, Underlying, short_put_theta
 
 
 def safety_margin(underlying_price: float, strike: float) -> float:
@@ -34,6 +34,7 @@ def filter_put_candidates(
     candidates = []
     for quote in quotes:
         contract = quote.contract
+        short_theta = short_put_theta(quote.theta)
         if (
             contract.underlying_symbol == underlying.symbol
             and contract.option_type is OptionType.PUT
@@ -41,7 +42,7 @@ def filter_put_candidates(
             and safety_margin(underlying.current_price, contract.strike) >= min_safety_margin
             and min_abs_delta <= abs(quote.delta) <= max_abs_delta
             and (min_iv is None or (quote.implied_volatility is not None and quote.implied_volatility >= min_iv))
-            and (min_short_theta is None or (quote.theta is not None and -quote.theta >= min_short_theta))
+            and (min_short_theta is None or (short_theta is not None and short_theta >= min_short_theta))
         ):
             candidates.append(quote)
     return candidates

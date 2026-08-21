@@ -308,6 +308,19 @@ PYTHONPATH=src python -m options_scanner.ibkr_diagnostic \
   --strike 100 --insecure-tls
 ```
 
+Para volver a comprobar específicamente el snapshot citado de AEHR (sin
+registrar URL, sesión, cookies, headers ni tokens), puede usarse:
+
+```bash
+PYTHONPATH=src python -m options_scanner.ibkr_diagnostic \
+  --deep --symbol AEHR --expiration 2026-10 --maturity 2026-10-02 \
+  --strike 75 --insecure-tls
+```
+
+El valor crudo relevante es el field `7310` de cada intento. El parser acepta
+y conserva tanto su signo negativo como positivo; el diagnóstico no lo
+convierte en theta de la posición corta.
+
 La salida de confirmación contiene únicamente los atributos seguros `conid`,
 `symbol`, `secType`, `exchange`, `listingExchange`, `right`, `strike`,
 `maturityDate`, `multiplier`, `tradingClass` y `validExchanges`. Para cada
@@ -427,6 +440,13 @@ Para Venta de PUT se preserva `contract_theta` sin alterar y se deriva
 `theta_decay_pct_per_day = short_theta / mid * 100`. Esta última métrica es una
 aproximación teórica de erosión temporal relativa a la prima, manteniendo las
 demás variables constantes; no es una rentabilidad diaria garantizada.
+El recorrido de theta no contiene normalización ni fallback: el field `7310`
+se parsea como número con signo, pasa por `IbkrOptionQuote`, `MarketData` y
+`PutScanCandidate.theta`, y se expone sin cambios como `contract_theta`. Solo
+al calcular la exposición de la posición se invierte una vez el signo. Tanto el
+filtro de theta como `theta_decay_pct_per_day` consumen esa exposición short;
+el renderer conserva columnas distintas para el valor contractual y el de la
+posición.
 
 El filtro de IV desactivado acepta también IV `N/D`; activado, un contrato sin IV
 no satisface ese criterio. Client Portal ofrece snapshots de IV actual, pero su

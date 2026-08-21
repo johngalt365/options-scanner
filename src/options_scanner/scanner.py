@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 from options_scanner.filters import filter_put_candidates, safety_margin
 from options_scanner.market_data import MarketDataProvider
-from options_scanner.models import MarketData
+from options_scanner.models import MarketData, short_put_theta
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +60,7 @@ class PutScanCandidate:
     @property
     def short_theta(self) -> float | None:
         """Position theta for a short PUT: the opposite of contract theta."""
-        return None if self.contract_theta is None else -self.contract_theta
+        return short_put_theta(self.contract_theta)
 
     @property
     def theta_decay_pct_per_day(self) -> float | None:
