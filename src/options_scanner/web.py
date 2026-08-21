@@ -332,7 +332,7 @@ def _result_heading(result: ScanResult | None, ticker: str) -> str:
     return f'<div class="result-head"><strong>{escape(ticker.upper())} &nbsp; {price}</strong><span>{status} · Actualizado {updated}{simulated}</span></div>'
 
 
-def _technical_chart(result: ScanResult | None) -> str:
+def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
     context = result.technical_context if result else None
     if result is None:
         return ""
@@ -364,6 +364,14 @@ def _technical_chart(result: ScanResult | None) -> str:
     )
     if context is None or not context.bars:
         return f'<section class="technical">{summary}<div class="history-unavailable" role="status"><strong>Histórico no disponible</strong><p>IBKR no devolvió barras históricas utilizables. El scan de opciones no se ha visto afectado.</p></div></section>'
+
+    if lazy:
+        ticker = escape(context.symbol)
+        return (f'<section class="technical" data-ticker="{ticker}">{summary}'
+                f'<details class="lazy-chart" data-chart-url="/scan-chart?ticker={ticker}">'
+                '<summary><span aria-hidden="true">▥</span> Ver gráfico histórico</summary>'
+                '<div class="chart-panel" role="status">El gráfico se cargará al abrir.</div>'
+                '</details></section>')
 
     bars = context.bars
     visible = tuple(supports) + tuple(resistances)
@@ -414,39 +422,55 @@ def _technical_chart(result: ScanResult | None) -> str:
 def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]) -> str:
     """Render comparison only; candidate ranking remains isolated per ticker."""
     rows = []
+    with_candidates = errors = 0
+    elapsed = 0.0
+    sortable = {0: "text", 1: "number", 4: "number", 6: "number", 8: "number", 9: "number", 10: "number"}
+    def badge(state: str | None) -> str:
+        value = state or "N/D"
+        lowered = value.lower()
+        kind = "frozen" if "frozen" in lowered else "delayed" if "delayed" in lowered else "realtime" if "realtime" in lowered else "na"
+        short = "Frozen" if kind == "frozen" else "Delayed" if kind == "delayed" else "RealTime" if kind == "realtime" else "N/D"
+        return f'<span class="status-badge {kind}" title="{escape(value)}">{short}</span>'
     for ticker, result, item_error in items:
         if result is None:
-            cells = (ticker,) + ("N/D",) * 11 + ("Error",)
+            errors += 1
+            cells = ((ticker, ticker), ("N/D", ""), (badge(None), "")) + tuple(("N/D", "") for _ in range(8))
             detail = f'<div class="row-error" role="status">{escape(item_error or "No se pudo completar este ticker.")}</div>'
+            row_class = "error-result"
         else:
+            elapsed += result.elapsed_seconds
             context = result.technical_context
             support = context.supports_below_price[0] if context and context.supports_below_price else None
-            resistance = context.resistances_above_price[0] if context and context.resistances_above_price else None
             distance_s = distance_to_zone_percent(result.underlying_price, support) if result.underlying_price else None
-            distance_r = distance_to_zone_percent(result.underlying_price, resistance) if result.underlying_price else None
             best = result.candidates[0] if result.candidates else None
+            with_candidates += bool(best)
             cells = (
-                ticker, f"${result.underlying_price:,.2f}" if result.underlying_price is not None else "N/D",
-                result.market_data_status or "N/D",
-                f"${support.lower:.2f}–${support.upper:.2f}" if support else "N/D",
-                f"{distance_s:+.2f} %" if distance_s is not None else "N/D", support.strength if support else "N/D",
-                f"${resistance.lower:.2f}–${resistance.upper:.2f}" if resistance else "N/D",
-                f"{distance_r:+.2f} %" if distance_r is not None else "N/D", str(len(result.candidates)),
-                f"${best.strike:.2f}" if best else "N/D", f"{best.delta:.4f}" if best and best.delta is not None else "N/D",
-                f"{best.premium_yield*100:.2f} %" if best and best.premium_yield is not None else "N/D",
-                f"{best.annualized_premium_yield*100:.2f} %" if best and best.annualized_premium_yield is not None else "N/D",
-                _scan_state(result),
+                (ticker, ticker),
+                (f"${result.underlying_price:,.2f}" if result.underlying_price is not None else "N/D", result.underlying_price),
+                (badge(result.market_data_status), ""),
+                (f"${support.lower:.2f}–${support.upper:.2f}" if support else "N/D", support.center if support else ""),
+                (f"{distance_s:+.2f} %" if distance_s is not None else "N/D", distance_s),
+                (support.strength.capitalize() if support else "N/D", support.strength if support else ""),
+                (str(len(result.candidates)), len(result.candidates)),
+                (f"${best.strike:.2f}" if best else "N/D", best.strike if best else ""),
+                (f"{best.delta:.4f}" if best and best.delta is not None else "N/D", best.delta if best and best.delta is not None else ""),
+                (f"{best.premium_yield*100:.2f} %" if best and best.premium_yield is not None else "N/D", best.premium_yield if best and best.premium_yield is not None else ""),
+                (f"{best.annualized_premium_yield*100:.2f} %" if best and best.annualized_premium_yield is not None else "N/D", best.annualized_premium_yield if best and best.annualized_premium_yield is not None else ""),
             )
-            detail = (_result_heading(result, ticker) + _technical_chart(result) + _interpretation(result) +
+            detail = (_result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
                       '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
                       ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico')) +
                       f'</tr></thead><tbody>{_rows(result)}</tbody></table></div>{_summary(result)}')
-        rendered = ''.join(f'<td>{escape(str(value))}</td>' for value in cells)
-        rows.append(f'<tr data-ticker="{escape(ticker)}">{rendered}<td><details class="ticker-detail"><summary>Ver detalle</summary><div class="detail-panel">{detail}</div></details></td></tr>')
-    headings = ('Ticker','Precio','Estado market data','S1','Distancia S1','Fuerza S1','R1','Distancia R1','Candidatos PUT completos','Mejor strike','Delta','Premium yield','Annualized yield','Estado del scan','Acción')
+            row_class = "has-candidates" if best else "no-candidates"
+        rendered = ''.join(f'<td data-sort-value="{escape(str(sort_value if sort_value is not None else ""))}">{value}</td>' for value, sort_value in cells)
+        rows.append(f'<tr data-ticker="{escape(ticker)}" class="{row_class}">{rendered}<td><details class="ticker-detail"><summary>Ver detalle</summary><div class="detail-panel"><button type="button" class="detail-close" aria-label="Cerrar detalle">Cerrar</button>{detail}</div></details></td></tr>')
+    headings = ('Ticker','Precio','Estado','S1','Distancia S1','Fuerza S1','Candidatos','Mejor strike','Delta','Premium yield','Annualized yield')
+    headers = ''.join(f'<th>{f"<button type=\"button\" class=\"sort-button\" data-column=\"{i}\" data-kind=\"{sortable[i]}\">{h} <span aria-hidden=\"true\">↕</span></button>" if i in sortable else h}</th>' for i, h in enumerate(headings))
+    total = len(items)
     return ('<section class="screener" aria-labelledby="screener-title"><h2 id="screener-title">Screener multi-ticker</h2>'
-            '<p class="note">Vista comparativa; el ranking se conserva independientemente dentro de cada ticker.</p>'
-            '<div class="scroll"><table><thead><tr>' + ''.join(f'<th>{h}</th>' for h in headings) +
+            f'<div class="scan-summary" role="status">{total} tickers · {with_candidates} con candidatos · {total-with_candidates-errors} sin candidatos · {elapsed:.1f} s · {errors} error</div>'
+            '<div class="quick-filters" role="group" aria-label="Filtros rápidos"><button type="button" class="active" data-filter="all">Todos</button><button type="button" data-filter="has-candidates">Con candidatos</button><button type="button" data-filter="no-candidates">Sin candidatos</button><button type="button" data-filter="strong">Soporte fuerte</button><button type="button" data-filter="near">Cerca de S1</button></div>'
+            '<div class="scroll"><table class="screener-table"><thead><tr>' + headers + '<th>Acción</th>' +
             '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></section>')
 
 
@@ -485,6 +509,8 @@ form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padd
 .technical{{background:white;padding:1rem;border-radius:8px}}.technical-title h2{{margin:0 0 .8rem}}.technical-metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:0}}.technical-metrics>div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}.technical details{{border-top:1px solid #dde2ea;padding-top:.7rem}}.technical details>summary{{color:#2358d5;width:max-content}}.chart-panel{{margin-top:.8rem}}.period-selector{{display:flex;gap:.35rem;margin-bottom:.6rem}}.period-button{{padding:.4rem .7rem;background:#e7ebf3;color:#263451}}.period-button.active{{background:#2358d5;color:white}}.technical svg{{width:100%;height:360px;background:#fafbfd;border:1px solid #dce2ec}}.price{{fill:none;stroke:#254fbd;stroke-width:2}}.zone.support{{fill:#2ca66f}}.zone.resistance{{fill:#db5a55}}.zone.weak{{opacity:.10}}.zone.medium{{opacity:.18}}.zone.strong{{opacity:.27}}.zone-label{{font-weight:800;font-size:14px}}.support-label{{fill:#176b48}}.resistance-label{{fill:#9b302c}}.grid{{stroke:#dfe4ec;stroke-width:1}}.axis-tick{{stroke:#778196}}.axis-label{{fill:#596273;font-size:11px}}.current-label{{fill:#182033;font-size:12px;font-weight:700}}.current{{stroke:#182033;stroke-width:1.5;stroke-dasharray:7 4}}.strike{{stroke:#8b55bb;stroke-width:1;stroke-dasharray:3 4}}.zone-strength{{display:block;font-size:.8rem;font-weight:500;text-transform:capitalize}}.zone-table-wrap{{overflow:auto;margin-top:.8rem}}.zone-table{{font-size:.9rem}}.zone-table th{{background:#eef1f6;color:#263451}}.technical-context{{background:#f6f8fb;padding:.8rem 1rem;margin-top:.7rem}}.history-unavailable{{background:#fff7db;border-left:4px solid #d18a00;padding:.75rem;margin-top:.8rem}}.history-unavailable p{{margin:.3rem 0 0}}.disclaimer{{color:#596273;font-size:.9rem}}
 .candidate-technical{{margin:0;min-width:10rem;text-align:left}}.candidate-technical summary{{white-space:nowrap}}.candidate-technical dl{{display:grid;grid-template-columns:repeat(2,minmax(7rem,1fr));gap:.35rem;margin:.6rem 0 0}}.candidate-technical dl div{{white-space:normal;background:#f4f6fa;padding:.35rem}}.candidate-technical dd{{font-size:.9rem}}.technical-compact{{font-weight:650}}
 .scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.scan-legend{{font-size:.8rem;color:#596273}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error,.row-error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.screener table{{font-size:.86rem}}.ticker-detail{{margin:0;text-align:left}}.detail-panel{{position:fixed;inset:5%;z-index:3;background:#f4f6fa;padding:1.2rem;box-shadow:0 8px 40px #0005;overflow:auto;white-space:normal}}.candidate-table{{font-size:.82rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
+/* Compact screener overrides */
+main{{max-width:1700px;padding:1rem}}h1{{font-size:1.45rem}}form#scan-form{{gap:.45rem .7rem;padding:.65rem}}form#scan-form label{{font-size:.78rem;gap:.15rem}}form#scan-form input,form#scan-form select{{padding:.4rem;width:7rem}}form#scan-form input[name="ticker"]{{width:14rem}}form#scan-form select[name="universe_source"]{{width:12rem}}.watchlists{{padding:.55rem .7rem}}.watchlists>h2,.watchlists>p{{display:none}}section{{margin-top:.8rem}}.screener h2{{font-size:1.15rem;margin:.2rem 0}}.scan-summary{{display:inline-block;background:#e8eef8;padding:.38rem .65rem;border-radius:5px;font-weight:700}}.quick-filters{{display:flex;gap:.35rem;margin:.5rem 0}}.quick-filters button{{background:#e4e9f1;color:#263451;padding:.35rem .65rem}}.quick-filters button.active{{background:#2358d5;color:white}}.sort-button{{padding:0;background:transparent;color:inherit;white-space:nowrap}}.screener th,.screener td{{padding:.45rem .5rem}}.screener th{{position:sticky;top:0}}.ticker-detail>summary{{color:#2358d5;list-style:none;white-space:nowrap}}.detail-close{{float:right;background:#566174}}.status-badge{{display:inline-block;padding:.12rem .4rem;border-radius:999px;font-size:.72rem;font-weight:800}}.status-badge.frozen{{background:#fff0b8;color:#684d00}}.status-badge.delayed{{background:#e8e0ff;color:#51359a}}.status-badge.realtime{{background:#dff4e8;color:#12643e}}.status-badge.na{{background:#e8ebef;color:#596273}}@media(max-width:800px){{main{{padding:.5rem}}.top{{display:block}}.connection{{margin:.5rem 0}}}}
 </style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading. <a href="/technical-check">Validación multi-ticker</a></p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div>{notice}<form method="post" id="scan-form">
 <label>Universo<select name="universe_source">{universe_options}</select></label><label>Tickers manuales<input name="ticker" value="{escape(v['ticker'])}" placeholder="NVDA, AAPL SPY" aria-describedby="ticker-help"><small id="ticker-help">Separados por comas o espacios</small></label><label>Min DTE<input type="number" name="min_dte" min="0" value="{escape(v['min_dte'])}" required></label><label>Max DTE<input type="number" name="max_dte" min="0" value="{escape(v['max_dte'])}" required></label>
 <label>Margen mínimo (%)<input type="number" name="min_safety_margin" min="0" max="100" step="0.01" value="{escape(v['min_safety_margin'])}" required></label><label>|Delta| mínima<input type="number" name="min_abs_delta" min="0" max="1" step="0.01" value="{escape(v['min_abs_delta'])}" required></label><label>|Delta| máxima<input type="number" name="max_abs_delta" min="0" max="1" step="0.01" value="{escape(v['max_abs_delta'])}" required></label>
@@ -500,6 +526,12 @@ function demoStatus(){{box.className='connection demo';box.querySelector('strong
 async function refresh(){{if(fake.checked){{demoStatus();return}} box.className='connection';box.querySelector('strong').textContent='Comprobando IBKR…';try{{const r=await fetch('/ibkr-status',{{cache:'no-store'}}),s=await r.json();box.className='connection '+s.state;box.querySelector('strong').textContent=s.text;box.querySelector('small').textContent=s.message}}catch(e){{box.className='connection disconnected';box.querySelector('strong').textContent='IBKR desconectado';box.querySelector('small').textContent='No se pudo comprobar Client Portal Gateway.'}}}}
 fake.addEventListener('change',()=>{{label.hidden=!fake.checked;refresh()}});document.querySelector('#refresh-status').addEventListener('click',refresh);refresh();
 document.addEventListener('click',event=>{{const button=event.target.closest('.period-button');if(!button)return;form.elements.historical_period.value=button.dataset.period;form.requestSubmit()}});
+document.addEventListener('click',event=>{{
+ const close=event.target.closest('.detail-close');if(close){{close.closest('.ticker-detail').open=false;return}}
+ const filter=event.target.closest('[data-filter]');if(filter){{document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b===filter));document.querySelectorAll('.screener-table tbody tr').forEach(row=>{{const distance=parseFloat(row.cells[4]?.dataset.sortValue),strength=row.cells[5]?.textContent.toLowerCase();row.hidden=!(filter.dataset.filter==='all'||row.classList.contains(filter.dataset.filter)||(filter.dataset.filter==='strong'&&strength.includes('fuerte'))||(filter.dataset.filter==='near'&&Number.isFinite(distance)&&Math.abs(distance)<=3))}});return}}
+ const sort=event.target.closest('.sort-button');if(sort){{const table=sort.closest('table'),body=table.tBodies[0],column=Number(sort.dataset.column),ascending=sort.dataset.direction!=='asc';document.querySelectorAll('.sort-button').forEach(b=>delete b.dataset.direction);sort.dataset.direction=ascending?'asc':'desc';const rows=Array.from(body.rows);rows.sort((a,b)=>{{let x=a.cells[column].dataset.sortValue,y=b.cells[column].dataset.sortValue;if(sort.dataset.kind==='number'){{x=x===''?Number.POSITIVE_INFINITY:Number(x);y=y===''?Number.POSITIVE_INFINITY:Number(y);return (x-y)*(ascending?1:-1)}}return x.localeCompare(y,undefined,{{numeric:true}})*(ascending?1:-1)}}).forEach(row=>body.append(row));}}
+}});
+document.addEventListener('toggle',async event=>{{const details=event.target;if(!details.matches('.lazy-chart')||!details.open||details.dataset.loaded)return;details.dataset.loaded='true';const panel=details.querySelector('.chart-panel');panel.textContent='Cargando gráfico…';try{{const response=await fetch(details.dataset.chartUrl);if(!response.ok)throw new Error();panel.innerHTML=await response.text()}}catch(error){{panel.textContent='Gráfico no disponible.'}}}},true);
 </script></main></body></html>'''
     return html.encode()
 
@@ -513,6 +545,7 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
     scanner = service or PutScanService()
     transport = status_transport or __import__("options_scanner.ibkr", fromlist=["ClientPortalTransport"]).ClientPortalTransport(base_url, allow_insecure_tls=True, timeout=2.0)
     technical_cache: dict[str, TechnicalCheckResult] = {}
+    scan_cache: dict[str, ScanResult] = {}
     store = workspace_store or UserWorkspaceStore()
     current_user = user or User("local", "Usuario local")
     try:
@@ -537,6 +570,14 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
             status = "200 OK" if ticker in technical_cache else "404 Not Found"
             start_response(status, [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store")])
             return [body]
+        if path == "/scan-chart" and environ.get("REQUEST_METHOD") == "GET":
+            ticker = parse_qs(environ.get("QUERY_STRING", "")).get("ticker", [""])[0].upper()
+            cached = scan_cache.get(ticker)
+            body = (_technical_chart(cached) if cached and cached.technical_context
+                    else '<p role="status">Gráfico no disponible.</p>')
+            status = "200 OK" if cached else "404 Not Found"
+            start_response(status, [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store")])
+            return [body.encode()]
         if environ.get("PATH_INFO") == "/ibkr-status" and environ.get("REQUEST_METHOD") == "GET":
             body = json.dumps(ibkr_connection_status(transport)).encode()
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8"), ("Cache-Control", "no-store")])
@@ -598,6 +639,7 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                         try:
                             item = scanner.run(ScanRequest(ticker=ticker, **request_options),
                                                base_url=base_url, allow_insecure_tls=True)
+                            scan_cache[ticker] = item
                             return ticker, item, None
                         except NotAuthenticatedError:
                             return ticker, None, "Sesión de IBKR no autenticada."
