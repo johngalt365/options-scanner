@@ -101,12 +101,21 @@ muestra un mensaje seguro y no expone el traceback ni respuestas internas.
 El campo **Tickers** admite símbolos separados por comas o espacios, elimina
 duplicados preservando su orden y muestra varios resultados en un screener
 comparativo compacto. Cada detalle se abre bajo demanda y su gráfico permanece
-cerrado inicialmente. Los scans de subyacentes son secuenciales por defecto
-(`ticker_workers=1` en `create_app`) y pueden configurarse hasta un máximo de
-dos; esto no cambia los workers internos de resolución contractual. Un fallo se
-confina a su fila. Como la implementación continúa siendo WSGI estándar y no
+cerrado inicialmente. Los scans usan por defecto un pool limitado
+(`ticker_workers=3` en `create_app`) configurable entre 1 y 4. Un semáforo
+compartido (`global_http_limit=8`) limita conjuntamente los tickers y los 8
+workers internos de `secdef/info`: la concurrencia HTTP efectiva predeterminada
+nunca supera 8, no 3×8. Un fallo o timeout se confina a su fila y los resultados
+se recogen en el orden original. Como la implementación continúa siendo WSGI estándar y no
 añade streaming ni dependencias, el progreso identifica el lote activo pero la
 tabla se incorpora al terminar la respuesta completa, no fila a fila.
+
+Cada ticker registra tiempo total y tiempos de resolución del subyacente,
+histórico, análisis técnico, resolución contractual y market data, además de
+contadores HTTP por endpoint (sin payloads, cookies ni headers). La vista muestra
+p50/p95 aproximado. `python benchmarks/benchmark_multi_scan.py` compara 1, 2, 3
+y 4 workers con latencia simulada; no mide ni permite inferir mejoras reales de
+IBKR.
 
 El selector **Universo** permite usar la entrada manual, uno de los grupos
 predefinidos o una watchlist suministrada a `create_app`. Las tres fuentes se

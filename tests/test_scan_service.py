@@ -73,3 +73,18 @@ class ScanRequestTest(TestCase):
                           result.summary.historical_status),(1,2,2,"6m","ok"))
         self.assertIn("historical_data",result.summary.phase_seconds)
         self.assertIn("technical_analysis",result.summary.phase_seconds)
+
+    def test_http_accounting_contains_only_endpoint_names_and_counts_history(self):
+        from collections import Counter
+        class Provider:
+            last_underlying=Underlying("NVDA",217.77)
+            last_underlying_conid="4815747"
+            http_call_counts=Counter({"secdef/search":1, "marketdata/snapshot":2})
+            def get_historical_bars(self, symbol, period):
+                self.http_call_counts["marketdata/history"] += 1
+                return ()
+        with patch("options_scanner.scan_puts._ibkr_candidates",return_value=[]):
+            result=PutScanService().run(ScanRequest(),provider=Provider())
+        self.assertEqual(result.summary.http_calls,
+                         {"secdef/search":1, "marketdata/snapshot":2, "marketdata/history":1})
+        self.assertNotIn("headers", str(result.summary.http_calls).lower())

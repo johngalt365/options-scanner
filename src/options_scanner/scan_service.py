@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 import time
 import logging
+import threading
 from typing import Callable
 
 from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
@@ -84,6 +85,7 @@ class ScanMetrics:
     technical_resistances: int = 0
     technical_supports_visible: int = 0
     technical_resistances_visible: int = 0
+    http_calls: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +114,7 @@ class PutScanService:
         market_data_timeout: float = 10.0, provider: object | None = None,
         batch_size: int = 50, snapshot_attempts: int = 2, contract_workers: int = 8,
         progress: bool = False, verbose: bool = False,
+        work_limiter: threading.BoundedSemaphore | None = None,
     ) -> ScanResult:
         started = self._clock()
         as_of = self._today()
@@ -140,6 +143,7 @@ class PutScanService:
             real_provider = provider or IbkrMarketDataProvider(ClientPortalTransport(
                 base_url, allow_insecure_tls=allow_insecure_tls,
                 timeout=max(.1, min(10.0, scan_timeout)),
+                work_limiter=work_limiter,
             ))
             args = Namespace(
                 ticker=request.ticker, min_dte=request.min_dte, max_dte=request.max_dte,
@@ -217,5 +221,7 @@ class PutScanService:
                     summary.technical_resistances_visible, summary.phase_seconds["historical_data"],
                     summary.phase_seconds["technical_analysis"],
                 )
+        if not request.fake:
+            summary.http_calls = dict(getattr(real_provider, "http_call_counts", {}))
         return ScanResult(ranked, summary, max(0.0, self._clock() - started), incomplete,
                           price, market_status, datetime.now(timezone.utc), request.fake, technical)

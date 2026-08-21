@@ -150,9 +150,12 @@ class WebTest(TestCase):
         manual = FORM.replace("NVDA", "nvda%2C+spy+NVDA+qqq") + "&universe_source=manual"
         watchlist = FORM.replace("ticker=NVDA", "ticker=") + "&universe_source=watchlist%3Acore"
 
-        manual_status, manual_page = request(create_app(manual_service), "POST", manual)
+        # A single worker makes invocation order observable; concurrent result
+        # ordering is covered independently by the multi-scan tests.
+        manual_status, manual_page = request(create_app(manual_service, ticker_workers=1), "POST", manual)
         watchlist_status, watchlist_page = request(
-            create_app(watchlist_service, watchlists={"core": ("nvda", "SPY", "nvda", "qqq")}),
+            create_app(watchlist_service, ticker_workers=1,
+                       watchlists={"core": ("nvda", "SPY", "nvda", "qqq")}),
             "POST", watchlist,
         )
 
@@ -189,7 +192,7 @@ class WebTest(TestCase):
         self.assertNotIn('<svg role="img"', page)
         self.assertNotIn('<details class="ticker-detail" open', page)
 
-    def test_multi_ticker_concurrency_is_configurable_and_capped_at_two(self):
+    def test_multi_ticker_concurrency_is_configurable_and_capped_at_four(self):
         import threading
         import time
         class MeasuringService(StubService):
@@ -202,10 +205,10 @@ class WebTest(TestCase):
                 with self.lock: self.active -= 1
                 return ScanResult((), ScanMetrics(), .01)
         service = MeasuringService()
-        request(create_app(service, ticker_workers=2), "POST", FORM.replace("NVDA", "AAOI+AEHR+COHR+LITE"))
-        self.assertEqual(service.maximum, 2)
+        request(create_app(service, ticker_workers=4), "POST", FORM.replace("NVDA", "AAOI+AEHR+COHR+LITE"))
+        self.assertEqual(service.maximum, 4)
         with self.assertRaises(ValueError):
-            create_app(service, ticker_workers=3)
+            create_app(service, ticker_workers=5)
 
     def test_compact_rows_cover_zone_absence_history_failure_and_feed_states(self):
         bar = HistoricalBar(date(2026, 1, 1), 100, 101, 99, 100)
