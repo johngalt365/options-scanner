@@ -232,28 +232,38 @@ class PutScanService:
         technical = None
         if price is not None:
             history_provider = DemoHistoricalDataProvider(as_of) if request.fake else real_provider
-            summary.historical_request = 1
+            periods = ((HistoricalPeriod.THREE_MONTHS, HistoricalPeriod.SIX_MONTHS,
+                        HistoricalPeriod.ONE_YEAR) if request.historical_period == HistoricalPeriod.MULTI
+                       else (request.historical_period,))
+            summary.historical_request = len(periods)
             summary.historical_period = request.historical_period.value
             history_started = self._clock()
-            try:
-                requested_period = (HistoricalPeriod.ONE_YEAR if request.historical_period == HistoricalPeriod.MULTI
-                                    else request.historical_period)
-                bars = history_provider.get_historical_bars(request.ticker, requested_period)
-                summary.historical_bars_received = getattr(history_provider, "last_historical_bars_received", len(bars))
-                summary.historical_bars_valid = len(bars)
-                summary.historical_status = "ok" if bars else "empty"
-            except Exception as exc:
-                # History is supplementary. Never let its HTTP/parsing failure
-                # invalidate option results and never log request/session data.
-                bars = ()
-                summary.historical_status = "error"
-                logger.warning("Historical data unavailable (%s)", type(exc).__name__)
+            histories = {}
+            failures = 0
+            for period in periods:
+                try:
+                    period_bars = history_provider.get_historical_bars(request.ticker, period)
+                    received = getattr(history_provider, "last_historical_bars_received", len(period_bars))
+                except Exception as exc:
+                    # Each Multi horizon is supplementary and independent: one
+                    # failed request must not erase successful sibling horizons.
+                    period_bars, received = (), 0
+                    failures += 1
+                    logger.warning("Historical data unavailable for %s (%s)",
+                                   period.value, type(exc).__name__)
+                histories[period] = tuple(period_bars)
+                summary.historical_bars_received += received
+                summary.historical_bars_valid += len(period_bars)
+            bars = (() if request.historical_period == HistoricalPeriod.MULTI
+                    else histories[request.historical_period])
+            if summary.historical_bars_valid:
+                summary.historical_status = "ok"
+            else:
+                summary.historical_status = "error" if failures else "empty"
             summary.phase_seconds["historical_data"] = max(0.0, self._clock() - history_started)
             technical_started = self._clock()
             strikes = tuple(candidate.strike for candidate in ranked if candidate.complete)
             if request.historical_period == HistoricalPeriod.MULTI:
-                histories = {period: tuple(bars[-period.sessions:]) for period in (
-                    HistoricalPeriod.THREE_MONTHS, HistoricalPeriod.SIX_MONTHS, HistoricalPeriod.ONE_YEAR)}
                 technical = build_multi_technical_context(request.ticker, histories, price, strikes)
             else:
                 technical = build_technical_context(request.ticker, request.historical_period, bars, price, strikes)

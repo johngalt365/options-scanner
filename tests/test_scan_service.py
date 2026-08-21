@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from options_scanner.scan_service import PutScanService, ScanRequest
 from options_scanner.models import Underlying
+from options_scanner.historical import HistoricalBar, HistoricalPeriod
 
 
 class ScanRequestTest(TestCase):
@@ -87,6 +88,64 @@ class ScanRequestTest(TestCase):
                           result.summary.historical_status),(1,2,2,"6m","ok"))
         self.assertIn("historical_data",result.summary.phase_seconds)
         self.assertIn("technical_analysis",result.summary.phase_seconds)
+
+    def test_multi_history_requests_and_preserves_each_available_horizon(self):
+        periods = (HistoricalPeriod.THREE_MONTHS, HistoricalPeriod.SIX_MONTHS,
+                   HistoricalPeriod.ONE_YEAR)
+        for available_count in (3, 2, 1, 0):
+            with self.subTest(available_count=available_count):
+                class Provider:
+                    last_underlying = Underlying("AEHR", 20.0)
+                    last_underlying_conid = "265598"
+
+                    def __init__(self):
+                        self.calls = []
+                        self.last_historical_bars_received = 0
+
+                    def get_historical_bars(self, symbol, period):
+                        self.calls.append((symbol, period, self.last_underlying_conid))
+                        if periods.index(period) >= available_count:
+                            self.last_historical_bars_received = 0
+                            return ()
+                        self.last_historical_bars_received = 1
+                        return (HistoricalBar(date(2026, 8, 20), 19, 21, 18, 20),)
+
+                provider = Provider()
+                with patch("options_scanner.scan_puts._ibkr_candidates", return_value=[]):
+                    result = PutScanService().run(
+                        ScanRequest(ticker="AEHR", historical_period=HistoricalPeriod.MULTI),
+                        provider=provider,
+                    )
+
+                self.assertEqual(provider.calls, [("AEHR", period, "265598") for period in periods])
+                contexts = result.technical_context.horizon_contexts
+                self.assertEqual([bool(item.bars) for item in contexts],
+                                 [index < available_count for index in range(3)])
+                self.assertEqual(result.summary.historical_request, 3)
+                self.assertEqual(result.summary.historical_bars_valid, available_count)
+                self.assertEqual(result.summary.historical_status,
+                                 "ok" if available_count else "empty")
+                self.assertEqual(bool(result.technical_context.bars), bool(available_count))
+
+    def test_multi_history_exception_does_not_discard_other_horizons(self):
+        class Provider:
+            last_underlying = Underlying("AEHR", 20.0)
+            last_underlying_conid = "265598"
+            last_historical_bars_received = 1
+
+            def get_historical_bars(self, symbol, period):
+                if period == HistoricalPeriod.SIX_MONTHS:
+                    raise RuntimeError("unavailable")
+                return (HistoricalBar(date(2026, 8, 20), 19, 21, 18, 20),)
+
+        with patch("options_scanner.scan_puts._ibkr_candidates", return_value=[]):
+            result = PutScanService().run(
+                ScanRequest(ticker="AEHR", historical_period=HistoricalPeriod.MULTI),
+                provider=Provider(),
+            )
+        self.assertEqual([bool(item.bars) for item in result.technical_context.horizon_contexts],
+                         [True, False, True])
+        self.assertEqual(result.summary.historical_status, "ok")
 
     def test_http_accounting_contains_only_endpoint_names_and_counts_history(self):
         from collections import Counter

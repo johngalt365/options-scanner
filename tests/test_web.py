@@ -10,7 +10,7 @@ from options_scanner.historical import HistoricalBar
 from datetime import timedelta
 from options_scanner.scanner import rank_candidates
 from options_scanner.technical_analysis import PriceZone, ZoneType
-from options_scanner.technical_context import TechnicalContext
+from options_scanner.technical_context import TechnicalContext, build_multi_technical_context
 from options_scanner.technical_check import TechnicalCheckResult
 from options_scanner.historical import HistoricalPeriod
 from datetime import date
@@ -124,6 +124,31 @@ class WebTest(TestCase):
                              values={"ticker": "ONE"}).decode()
         self.assertIn('<svg role="img"', single)
         self.assertIn("Ver gráfico", single)
+
+    def test_multi_detail_shows_status_for_each_horizon_and_partial_chart(self):
+        bar = HistoricalBar(date(2026, 1, 2), 99, 102, 98, 101)
+        context = build_multi_technical_context("AEHR", {
+            HistoricalPeriod.THREE_MONTHS: (bar,),
+            HistoricalPeriod.SIX_MONTHS: (bar,),
+            HistoricalPeriod.ONE_YEAR: (),
+        }, 101)
+        page = render_page(result=ScanResult(
+            (), ScanMetrics(historical_status="ok", historical_period="multi"), .01,
+            underlying_price=101, technical_context=context,
+        ), values={"ticker": "AEHR", "historical_period": "multi"}).decode()
+        self.assertIn("3M ✓ · 6M ✓ · 1A sin datos", page)
+        self.assertNotIn("Histórico no disponible", page)
+        self.assertIn('<svg role="img"', page)
+
+        one_context = build_multi_technical_context("AEHR", {
+            HistoricalPeriod.THREE_MONTHS: (bar,),
+        }, 101)
+        one_page = render_page(result=ScanResult(
+            (), ScanMetrics(historical_status="ok", historical_period="multi"), .01,
+            underlying_price=101, technical_context=one_context,
+        ), values={"ticker": "AEHR", "historical_period": "multi"}).decode()
+        self.assertIn("No hay suficientes horizontes para determinar confluencia", one_page)
+        self.assertNotIn("Histórico no disponible", one_page)
 
     def test_explainable_strike_columns_quick_filters_and_sorting_controls(self):
         zone = PriceZone(70.73, 91.04, 80, ZoneType.SUPPORT, 3, date(2026, 8, 1), 75, "fuerte")
