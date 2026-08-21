@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from options_scanner.technical_analysis import PriceZone
+    from options_scanner.short_put_ranking import ShortPutEvaluation
 
 from options_scanner.filters import filter_put_candidates, safety_margin
 from options_scanner.market_data import MarketDataProvider
@@ -38,6 +39,7 @@ class PutScanCandidate:
     support_position_label: str | None = None
     support_last_contact_sessions: int | None = None
     event_context: str = "normal"
+    evaluation: "ShortPutEvaluation | None" = None
 
     @property
     def mid(self) -> float | None:
@@ -67,6 +69,13 @@ class PutScanCandidate:
         """Theoretical daily decay relative to premium, not a guaranteed return."""
         mid = self.mid
         return None if mid is None or mid <= 0 or self.short_theta is None else self.short_theta / mid * 100
+
+    @property
+    def relative_spread(self) -> float | None:
+        """Bid/ask spread relative to mid; unavailable markets remain explicit."""
+        mid = self.mid
+        return (None if self.bid is None or self.ask is None or mid is None or mid <= 0
+                else (self.ask - self.bid) / mid)
 
     @property
     def complete(self) -> bool:

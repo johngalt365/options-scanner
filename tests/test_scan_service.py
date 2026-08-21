@@ -30,7 +30,11 @@ class ScanRequestTest(TestCase):
         result = service.run(ScanRequest(fake=True))
         self.assertEqual(len(result.candidates), 2)
         self.assertTrue(all(candidate.complete for candidate in result.candidates))
-        yields = [candidate.annualized_premium_yield for candidate in result.candidates]
+        scores = [candidate.evaluation.total_score for candidate in result.candidates]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        # The legacy annualized-yield sorter remains available separately.
+        from options_scanner.scanner import rank_candidates
+        yields = [candidate.annualized_premium_yield for candidate in rank_candidates(result.candidates)]
         self.assertEqual(yields, sorted(yields, reverse=True))
         self.assertEqual((result.summary.considered, result.summary.complete), (3, 2))
 

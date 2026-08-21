@@ -16,6 +16,7 @@ from options_scanner.scanner import PutScanCandidate, build_candidates, rank_can
 from options_scanner.historical import DemoHistoricalDataProvider, HistoricalPeriod
 from options_scanner.technical_context import (TechnicalContext, build_multi_technical_context,
                                                build_technical_context)
+from options_scanner.short_put_ranking import rank_by_score
 
 logger = logging.getLogger(__name__)
 
@@ -307,5 +308,8 @@ class PutScanService:
                 )
         if not request.fake:
             summary.http_calls = dict(getattr(real_provider, "http_call_counts", {}))
+        # Evaluation is deliberately downstream from all existing filters and
+        # technical enrichment. It can only order already-valid candidates.
+        ranked = tuple(rank_by_score(ranked, technical))
         return ScanResult(ranked, summary, max(0.0, self._clock() - started), incomplete,
                           price, market_status, datetime.now(timezone.utc), request.fake, technical)
