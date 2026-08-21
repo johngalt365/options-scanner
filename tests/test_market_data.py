@@ -29,6 +29,20 @@ class StubTransport:
         return [{"conid": conid, "84": "1.75", "86": "1.90", "7308": "-0.25", "7309": "0.016", "7310": "-0.05", "7311": "0.09", "7633": "35", "7638": "1750", "6509": "ZBd"}]
 
 class IbkrMappingTest(TestCase):
+    def test_etf_underlying_fallback_keeps_option_discovery_strict(self):
+        class EtfTransport:
+            def __init__(self): self.calls = []
+            def get(self, path, params):
+                self.calls.append((path, params.copy()))
+                if params.get("secType") == "STK": return []
+                return [{"symbol": "SPY", "conid": 756733, "secType": "ETF",
+                         "sections": [{"secType": "OPT", "months": "SEP26"}]}]
+        transport = EtfTransport()
+        conid, expirations = IbkrMarketDataProvider(transport).locate_stock("spy")
+        self.assertEqual(conid, "756733")
+        self.assertTrue(expirations)
+        self.assertEqual([params["secType"] for _, params in transport.calls], ["STK", "ETF"])
+
     def test_ibkr_percentage_points_are_normalized_to_canonical_fraction(self):
         normalize = IbkrMarketDataProvider._canonical_implied_volatility
         for wire_value, canonical in ((0.0, 0.0), (12.5, .125), (48.2, .482), (100.0, 1.0)):

@@ -98,6 +98,16 @@ read-only; el certificado local self-signed se acepta únicamente para esa
 conexión local. Si Gateway no responde o perdió la autenticación, la página
 muestra un mensaje seguro y no expone el traceback ni respuestas internas.
 
+El campo **Tickers** admite símbolos separados por comas o espacios, elimina
+duplicados preservando su orden y muestra varios resultados en un screener
+comparativo compacto. Cada detalle se abre bajo demanda y su gráfico permanece
+cerrado inicialmente. Los scans de subyacentes son secuenciales por defecto
+(`ticker_workers=1` en `create_app`) y pueden configurarse hasta un máximo de
+dos; esto no cambia los workers internos de resolución contractual. Un fallo se
+confina a su fila. Como la implementación continúa siendo WSGI estándar y no
+añade streaming ni dependencias, el progreso identifica el lote activo pero la
+tabla se incorpora al terminar la respuesta completa, no fila a fila.
+
 ## Scanner real de venta de PUTs
 
 El primer scanner ejecutable está limitado por defecto a NVDA, es de **solo

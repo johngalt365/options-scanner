@@ -67,6 +67,11 @@ class IbkrHistoricalDataProvider:
         else:
             rows = self._transport.get("/iserver/secdef/search", {"symbol": symbol.upper(), "secType": "STK"})
             match = next((r for r in rows if isinstance(r, Mapping) and str(r.get("symbol", "")).upper() == symbol.upper()), None)
+            if not match:
+                rows = self._transport.get("/iserver/secdef/search", {"symbol": symbol.upper(), "secType": "ETF"})
+                match = next((r for r in rows if isinstance(r, Mapping)
+                              and str(r.get("symbol", "")).upper() == symbol.upper()
+                              and str(r.get("secType", "ETF")).upper() in ("ETF", "STK")), None)
             if not match or match.get("conid") is None:
                 return ()
             conid = str(match["conid"])

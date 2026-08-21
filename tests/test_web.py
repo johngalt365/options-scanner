@@ -4,7 +4,7 @@ from unittest import TestCase
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
-from options_scanner.web import (_interpretation, _rows, create_app, ibkr_connection_status,
+from options_scanner.web import (_interpretation, _rows, create_app, ibkr_connection_status, parse_tickers,
                                  render_technical_screener)
 from options_scanner.historical import HistoricalBar
 from datetime import timedelta
@@ -55,6 +55,52 @@ class StatusTransport:
 
 
 class WebTest(TestCase):
+    def test_ticker_list_normalizes_separators_case_and_duplicates(self):
+        self.assertEqual(parse_tickers(" aaoi, NVDA  aaoi\tspy,QQQ "),
+                         ("AAOI", "NVDA", "SPY", "QQQ"))
+        self.assertEqual(parse_tickers("asx"), ("ASX",))
+        for invalid in ("", "NVDA,$BAD", "TOO-LONG-SYMBOL"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_tickers(invalid)
+
+    def test_multi_ticker_is_compact_and_failure_does_not_abort_other_rows(self):
+        class MixedService(StubService):
+            def run(self, scan_request, **kwargs):
+                self.requests.append(scan_request)
+                if scan_request.ticker == "BAD":
+                    raise RuntimeError("secret payload cookie")
+                return ScanResult((), ScanMetrics(historical_status="empty"), .01,
+                                  underlying_price=100, market_data_status="Delayed")
+        service = MixedService()
+        status, page = request(create_app(service), "POST", FORM.replace("NVDA", "nvda%2C+BAD+spy"))
+        self.assertEqual(status, "200 OK")
+        self.assertEqual([item.ticker for item in service.requests], ["NVDA", "BAD", "SPY"])
+        self.assertEqual(page.count('class="ticker-detail"'), 3)
+        self.assertIn("Screener multi-ticker", page)
+        self.assertIn("Delayed", page)
+        self.assertIn("No se pudo completar este ticker.", page)
+        self.assertNotIn("secret payload", page)
+        self.assertNotIn('<svg role="img"', page)
+        self.assertNotIn('<details class="ticker-detail" open', page)
+
+    def test_multi_ticker_concurrency_is_configurable_and_capped_at_two(self):
+        import threading
+        import time
+        class MeasuringService(StubService):
+            def __init__(self):
+                super().__init__(); self.active = self.maximum = 0; self.lock = threading.Lock()
+            def run(self, scan_request, **kwargs):
+                with self.lock:
+                    self.active += 1; self.maximum = max(self.maximum, self.active)
+                time.sleep(.02)
+                with self.lock: self.active -= 1
+                return ScanResult((), ScanMetrics(), .01)
+        service = MeasuringService()
+        request(create_app(service, ticker_workers=2), "POST", FORM.replace("NVDA", "AAOI+AEHR+COHR+LITE"))
+        self.assertEqual(service.maximum, 2)
+        with self.assertRaises(ValueError):
+            create_app(service, ticker_workers=3)
+
     def test_compact_rows_cover_zone_absence_history_failure_and_feed_states(self):
         bar = HistoricalBar(date(2026, 1, 1), 100, 101, 99, 100)
         support = PriceZone(98, 100, 99, ZoneType.SUPPORT, 4, date(2026, 1, 1), 2, "Fuerte")

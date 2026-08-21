@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from html import escape
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
+import re
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
@@ -18,6 +20,23 @@ from options_scanner.technical_check import (DEFAULT_TICKERS, TechnicalCheckResu
 from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
 
 logger = logging.getLogger(__name__)
+
+TICKER_SEPARATOR = re.compile(r"[\s,]+")
+
+
+def parse_tickers(value: str) -> tuple[str, ...]:
+    """Normalize and validate a comma/whitespace separated ticker list."""
+    symbols = tuple(dict.fromkeys(part.upper() for part in TICKER_SEPARATOR.split(value.strip()) if part))
+    if not symbols:
+        raise ValueError("Debes indicar al menos un ticker.")
+    # Reuse the domain request validation rather than creating a second symbol policy.
+    for symbol in symbols:
+        ScanRequest(ticker=symbol)
+    return symbols
+
+
+def _scan_state(result: ScanResult) -> str:
+    return "Parcial" if result.summary.timed_out or result.summary.historical_status == "error" else "Completado"
 
 
 def render_technical_screener(results: tuple[TechnicalCheckResult, ...]) -> bytes:
@@ -365,30 +384,70 @@ def _technical_chart(result: ScanResult | None) -> str:
     return f'<section class="technical" data-ticker="{escape(context.symbol)}">{summary}<details id="{identity}"><summary><span aria-hidden="true">▥</span> Ver gráfico</summary><div class="chart-panel"><div class="period-selector" aria-label="Periodo histórico">{buttons}</div>{svg}{explanation}<div class="technical-context"><ul>{strike_messages}</ul><p class="disclaimer">Las zonas se derivan del comportamiento histórico del precio y no garantizan reacciones futuras. Son contexto informativo y no constituyen una recomendación de inversión.</p></div></div></details></section>'
 
 
-def render_page(values: dict[str, str] | None = None, result: ScanResult | None = None, error: str | None = None) -> bytes:
+def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]) -> str:
+    """Render comparison only; candidate ranking remains isolated per ticker."""
+    rows = []
+    for ticker, result, item_error in items:
+        if result is None:
+            cells = (ticker,) + ("N/D",) * 11 + ("Error",)
+            detail = f'<div class="row-error" role="status">{escape(item_error or "No se pudo completar este ticker.")}</div>'
+        else:
+            context = result.technical_context
+            support = context.supports_below_price[0] if context and context.supports_below_price else None
+            resistance = context.resistances_above_price[0] if context and context.resistances_above_price else None
+            distance_s = distance_to_zone_percent(result.underlying_price, support) if result.underlying_price else None
+            distance_r = distance_to_zone_percent(result.underlying_price, resistance) if result.underlying_price else None
+            best = result.candidates[0] if result.candidates else None
+            cells = (
+                ticker, f"${result.underlying_price:,.2f}" if result.underlying_price is not None else "N/D",
+                result.market_data_status or "N/D",
+                f"${support.lower:.2f}–${support.upper:.2f}" if support else "N/D",
+                f"{distance_s:+.2f} %" if distance_s is not None else "N/D", support.strength if support else "N/D",
+                f"${resistance.lower:.2f}–${resistance.upper:.2f}" if resistance else "N/D",
+                f"{distance_r:+.2f} %" if distance_r is not None else "N/D", str(len(result.candidates)),
+                f"${best.strike:.2f}" if best else "N/D", f"{best.delta:.4f}" if best and best.delta is not None else "N/D",
+                f"{best.premium_yield*100:.2f} %" if best and best.premium_yield is not None else "N/D",
+                f"{best.annualized_premium_yield*100:.2f} %" if best and best.annualized_premium_yield is not None else "N/D",
+                _scan_state(result),
+            )
+            detail = (_result_heading(result, ticker) + _technical_chart(result) + _interpretation(result) +
+                      '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
+                      ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico')) +
+                      f'</tr></thead><tbody>{_rows(result)}</tbody></table></div>{_summary(result)}')
+        rendered = ''.join(f'<td>{escape(str(value))}</td>' for value in cells)
+        rows.append(f'<tr data-ticker="{escape(ticker)}">{rendered}<td><details class="ticker-detail"><summary>Ver detalle</summary><div class="detail-panel">{detail}</div></details></td></tr>')
+    headings = ('Ticker','Precio','Estado market data','S1','Distancia S1','Fuerza S1','R1','Distancia R1','Candidatos PUT completos','Mejor strike','Delta','Premium yield','Annualized yield','Estado del scan','Acción')
+    return ('<section class="screener" aria-labelledby="screener-title"><h2 id="screener-title">Screener multi-ticker</h2>'
+            '<p class="note">Vista comparativa; el ranking se conserva independientemente dentro de cada ticker.</p>'
+            '<div class="scroll"><table><thead><tr>' + ''.join(f'<th>{h}</th>' for h in headings) +
+            '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></section>')
+
+
+def render_page(values: dict[str, str] | None = None, result: ScanResult | None = None, error: str | None = None,
+                multi_results: tuple[tuple[str, ScanResult | None, str | None], ...] = ()) -> bytes:
     v = {"ticker": "NVDA", "min_dte": "30", "max_dte": "45", "min_safety_margin": "20",
          "min_abs_delta": "0.15", "max_abs_delta": "0.30", "mode": "fake", "historical_period":"6m"}
     if values:
         v.update(values)
     checked = " checked" if v["mode"] == "fake" else ""
     alert = f'<div class="error" role="alert">{escape(error)}</div>' if error else ""
-    table = "" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>'''
+    table = _multi_screener(multi_results) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
     html = f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Options Scanner</title><style>
 body{{font:15px system-ui;margin:0;background:#f4f6fa;color:#182033}}main{{max-width:1500px;margin:auto;padding:2rem}}h1{{margin:0}}.note{{color:#556}}.top{{display:flex;justify-content:space-between;gap:1rem;align-items:start}}.connection{{background:white;padding:.7rem;border-radius:8px;min-width:220px}}.dot{{display:inline-block;width:.75rem;height:.75rem;border-radius:50%;background:#818895;margin-right:.4rem}}.connected .dot{{background:#198754}}.login .dot{{background:#e58a00}}.disconnected .dot{{background:#c52d36}}.demo .dot{{background:#818895}}.connection button{{font-size:.8rem;padding:.35rem .6rem;margin-top:.4rem}}.connection small{{display:block;color:#596273;margin-top:.25rem}}
 form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padding:1.25rem;border-radius:10px;box-shadow:0 2px 8px #0001}}label{{display:grid;gap:.35rem;font-weight:600}}input{{padding:.55rem;border:1px solid #aab3c5;border-radius:5px;width:9rem}}button{{background:#2358d5;color:white;border:0;border-radius:5px;padding:.7rem 1.4rem;font-weight:700;cursor:pointer}}button:disabled{{cursor:not-allowed;opacity:.65}}.mode{{display:flex;align-items:center;gap:.4rem}}.mode input{{width:auto}}
 .interpretation{{background:white;padding:1rem 1.2rem;border-radius:8px;border-left:4px solid #60708c;margin-top:1rem}}.interpretation h2{{margin-top:0}}.interpretation-message{{margin:.45rem 0;padding:.45rem .65rem;border-radius:4px}}.interpretation-message.success{{background:#e9f7ef;border-left:3px solid #198754}}.interpretation-message.neutral{{background:#eef3fb;border-left:3px solid #60708c}}.interpretation-message.warning{{background:#fff7db;border-left:3px solid #d18a00}}.interpretation-message.error{{background:#fff0f0;border-left:3px solid #c22}}.interpretation ul{{margin-bottom:0}}.interpretation dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem}}.interpretation dl div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}
 .technical{{background:white;padding:1rem;border-radius:8px}}.technical-title h2{{margin:0 0 .8rem}}.technical-metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:0}}.technical-metrics>div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}.technical details{{border-top:1px solid #dde2ea;padding-top:.7rem}}.technical details>summary{{color:#2358d5;width:max-content}}.chart-panel{{margin-top:.8rem}}.period-selector{{display:flex;gap:.35rem;margin-bottom:.6rem}}.period-button{{padding:.4rem .7rem;background:#e7ebf3;color:#263451}}.period-button.active{{background:#2358d5;color:white}}.technical svg{{width:100%;height:360px;background:#fafbfd;border:1px solid #dce2ec}}.price{{fill:none;stroke:#254fbd;stroke-width:2}}.zone.support{{fill:#2ca66f}}.zone.resistance{{fill:#db5a55}}.zone.weak{{opacity:.10}}.zone.medium{{opacity:.18}}.zone.strong{{opacity:.27}}.zone-label{{font-weight:800;font-size:14px}}.support-label{{fill:#176b48}}.resistance-label{{fill:#9b302c}}.grid{{stroke:#dfe4ec;stroke-width:1}}.axis-tick{{stroke:#778196}}.axis-label{{fill:#596273;font-size:11px}}.current-label{{fill:#182033;font-size:12px;font-weight:700}}.current{{stroke:#182033;stroke-width:1.5;stroke-dasharray:7 4}}.strike{{stroke:#8b55bb;stroke-width:1;stroke-dasharray:3 4}}.zone-strength{{display:block;font-size:.8rem;font-weight:500;text-transform:capitalize}}.zone-table-wrap{{overflow:auto;margin-top:.8rem}}.zone-table{{font-size:.9rem}}.zone-table th{{background:#eef1f6;color:#263451}}.technical-context{{background:#f6f8fb;padding:.8rem 1rem;margin-top:.7rem}}.history-unavailable{{background:#fff7db;border-left:4px solid #d18a00;padding:.75rem;margin-top:.8rem}}.history-unavailable p{{margin:.3rem 0 0}}.disclaimer{{color:#596273;font-size:.9rem}}
 .candidate-technical{{margin:0;min-width:10rem;text-align:left}}.candidate-technical summary{{white-space:nowrap}}.candidate-technical dl{{display:grid;grid-template-columns:repeat(2,minmax(7rem,1fr));gap:.35rem;margin:.6rem 0 0}}.candidate-technical dl div{{white-space:normal;background:#f4f6fa;padding:.35rem}}.candidate-technical dd{{font-size:.9rem}}.technical-compact{{font-weight:650}}
-.scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
+.scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.scan-legend{{font-size:.8rem;color:#596273}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error,.row-error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.screener table{{font-size:.86rem}}.ticker-detail{{margin:0;text-align:left}}.detail-panel{{position:fixed;inset:5%;z-index:3;background:#f4f6fa;padding:1.2rem;box-shadow:0 8px 40px #0005;overflow:auto;white-space:normal}}.candidate-table{{font-size:.82rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
 </style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading. <a href="/technical-check">Validación multi-ticker</a></p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div><form method="post">
-<label>Ticker<input name="ticker" value="{escape(v['ticker'])}" required></label><label>Min DTE<input type="number" name="min_dte" min="0" value="{escape(v['min_dte'])}" required></label><label>Max DTE<input type="number" name="max_dte" min="0" value="{escape(v['max_dte'])}" required></label>
+<label>Tickers<input name="ticker" value="{escape(v['ticker'])}" placeholder="NVDA, AAPL SPY" aria-describedby="ticker-help" required><small id="ticker-help">Separados por comas o espacios</small></label><label>Min DTE<input type="number" name="min_dte" min="0" value="{escape(v['min_dte'])}" required></label><label>Max DTE<input type="number" name="max_dte" min="0" value="{escape(v['max_dte'])}" required></label>
 <label>Margen mínimo (%)<input type="number" name="min_safety_margin" min="0" max="100" step="0.01" value="{escape(v['min_safety_margin'])}" required></label><label>|Delta| mínima<input type="number" name="min_abs_delta" min="0" max="1" step="0.01" value="{escape(v['min_abs_delta'])}" required></label><label>|Delta| máxima<input type="number" name="max_abs_delta" min="0" max="1" step="0.01" value="{escape(v['max_abs_delta'])}" required></label>
 <label>Histórico<select name="historical_period"><option value="3m"{' selected' if v['historical_period']=='3m' else ''}>3M</option><option value="6m"{' selected' if v['historical_period']=='6m' else ''}>6M</option><option value="1y"{' selected' if v['historical_period']=='1y' else ''}>1A</option></select></label>
-<label class="mode"><input id="fake-mode" type="checkbox" name="fake" value="1"{checked}> Modo demostración</label><button id="scan-button" type="submit">Scan</button></form><p id="demo-label" class="demo-label"{' hidden' if not checked else ''}>Datos simulados — no proceden de Interactive Brokers</p><div id="scan-status" class="scan-status" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><div><strong id="scan-title"></strong><span id="scan-source"></span><span>Tiempo transcurrido: <b id="scan-timer">00:00</b></span></div></div><div id="scan-output" aria-live="polite">{alert}{table}{_summary(result)}</div><script>
+<label class="mode"><input id="fake-mode" type="checkbox" name="fake" value="1"{checked}> Modo demostración</label><button id="scan-button" type="submit">Scan</button></form><p id="demo-label" class="demo-label"{' hidden' if not checked else ''}>Datos simulados — no proceden de Interactive Brokers</p><div id="scan-status" class="scan-status" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><div><strong id="scan-title"></strong><span id="scan-source"></span><span>Tiempo transcurrido: <b id="scan-timer">00:00</b></span><span class="scan-legend">Estados: Pendiente / Analizando / Completado / Parcial / Error</span></div></div><div id="scan-output" aria-live="polite">{alert}{table}{_summary(result)}</div><script>
 const box=document.querySelector('#connection'),fake=document.querySelector('#fake-mode'),label=document.querySelector('#demo-label'),form=document.querySelector('form'),scanButton=document.querySelector('#scan-button'),scanStatus=document.querySelector('#scan-status'),scanOutput=document.querySelector('#scan-output'),timer=document.querySelector('#scan-timer');let scanning=false,interval;
 function elapsed(seconds){{const value=Math.floor(seconds);return String(Math.floor(value/60)).padStart(2,'0')+':'+String(value%60).padStart(2,'0')}}
 function finishScan(){{scanning=false;clearInterval(interval);scanStatus.hidden=true;scanButton.disabled=false;scanButton.textContent='Scan'}}
-form.addEventListener('submit',async event=>{{event.preventDefault();if(scanning)return;scanning=true;scanButton.disabled=true;scanButton.textContent='Scan en curso...';scanOutput.replaceChildren();scanStatus.hidden=false;document.querySelector('#scan-title').textContent='Escaneando '+form.elements.ticker.value.trim().toUpperCase()+'...';document.querySelector('#scan-source').textContent=fake.checked?'Consultando datos de demostración...':'Consultando Interactive Brokers...';const started=performance.now();timer.textContent='00:00';interval=setInterval(()=>timer.textContent=elapsed((performance.now()-started)/1000),250);try{{const response=await fetch('/',{{method:'POST',body:new URLSearchParams(new FormData(form)),headers:{{'X-Requested-With':'fetch'}}}}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),output=doc.querySelector('#scan-output');if(!output)throw new Error('invalid response');scanOutput.replaceChildren(...Array.from(output.childNodes).map(node=>document.importNode(node,true)));const seconds=(performance.now()-started)/1000;if(response.ok){{const done=document.createElement('p');done.className='completion';done.textContent='Scan completado en '+seconds.toFixed(1)+' s';scanOutput.prepend(done)}}else if(!scanOutput.querySelector('[role="alert"]'))throw new Error('unsafe response')}}catch(error){{scanOutput.replaceChildren();const alert=document.createElement('div');alert.className='error';alert.setAttribute('role','alert');alert.textContent='No se pudo completar el scan. Inténtalo de nuevo.';scanOutput.append(alert)}}finally{{finishScan()}}}});
+form.addEventListener('submit',async event=>{{event.preventDefault();if(scanning)return;scanning=true;scanButton.disabled=true;scanButton.textContent='Scan en curso...';scanOutput.replaceChildren();scanStatus.hidden=false;const tickers=[...new Set(form.elements.ticker.value.trim().toUpperCase().split(/[,\\s]+/).filter(Boolean))];document.querySelector('#scan-title').textContent=tickers.length>1?'Analizando 1 de '+tickers.length+' — '+tickers[0]:'Escaneando '+form.elements.ticker.value.trim().toUpperCase()+'...';document.querySelector('#scan-source').textContent=fake.checked?'Consultando datos de demostración...':'Consultando Interactive Brokers...';const started=performance.now();timer.textContent='00:00';interval=setInterval(()=>timer.textContent=elapsed((performance.now()-started)/1000),250);try{{const response=await fetch('/',{{method:'POST',body:new URLSearchParams(new FormData(form)),headers:{{'X-Requested-With':'fetch'}}}}),html=await response.text(),doc=new DOMParser().parseFromString(html,'text/html'),output=doc.querySelector('#scan-output');if(!output)throw new Error('invalid response');scanOutput.replaceChildren(...Array.from(output.childNodes).map(node=>document.importNode(node,true)));const seconds=(performance.now()-started)/1000;if(response.ok){{const done=document.createElement('p');done.className='completion';done.textContent='Scan completado en '+seconds.toFixed(1)+' s';scanOutput.prepend(done)}}else if(!scanOutput.querySelector('[role="alert"]'))throw new Error('unsafe response')}}catch(error){{scanOutput.replaceChildren();const alert=document.createElement('div');alert.className='error';alert.setAttribute('role','alert');alert.textContent='No se pudo completar el scan. Inténtalo de nuevo.';scanOutput.append(alert)}}finally{{finishScan()}}}});
 function demoStatus(){{box.className='connection demo';box.querySelector('strong').textContent='Modo demostración';box.querySelector('small').textContent='La conexión IBKR no es necesaria para este scan.';}}
 async function refresh(){{if(fake.checked){{demoStatus();return}} box.className='connection';box.querySelector('strong').textContent='Comprobando IBKR…';try{{const r=await fetch('/ibkr-status',{{cache:'no-store'}}),s=await r.json();box.className='connection '+s.state;box.querySelector('strong').textContent=s.text;box.querySelector('small').textContent=s.message}}catch(e){{box.className='connection disconnected';box.querySelector('strong').textContent='IBKR desconectado';box.querySelector('small').textContent='No se pudo comprobar Client Portal Gateway.'}}}}
 fake.addEventListener('change',()=>{{label.hidden=!fake.checked;refresh()}});document.querySelector('#refresh-status').addEventListener('click',refresh);refresh();
@@ -398,7 +457,9 @@ document.addEventListener('click',event=>{{const button=event.target.closest('.p
 
 
 def create_app(service: PutScanService | None = None, *, base_url: str = "https://localhost:5000/v1/api", status_transport: object | None = None,
-               technical_price_provider=None, technical_history_provider=None):
+               technical_price_provider=None, technical_history_provider=None, ticker_workers: int = 1):
+    if ticker_workers not in (1, 2):
+        raise ValueError("ticker_workers debe ser 1 o 2")
     scanner = service or PutScanService()
     transport = status_transport or __import__("options_scanner.ibkr", fromlist=["ClientPortalTransport"]).ClientPortalTransport(base_url, allow_insecure_tls=True, timeout=2.0)
     technical_cache: dict[str, TechnicalCheckResult] = {}
@@ -427,6 +488,7 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
             return [b"Not found"]
         values: dict[str, str] = {}
         result = None
+        multi_results: tuple[tuple[str, ScanResult | None, str | None], ...] = ()
         error = None
         status = "200 OK"
         if environ["REQUEST_METHOD"] == "POST":
@@ -435,15 +497,39 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                 data = parse_qs(environ["wsgi.input"].read(size).decode("utf-8"), keep_blank_values=True)
                 values = {key: entries[0] for key, entries in data.items()}
                 values["mode"] = "fake" if values.get("fake") == "1" else "live"
-                request = ScanRequest(
-                    ticker=values.get("ticker", ""), min_dte=int(values.get("min_dte", "")),
+                tickers = parse_tickers(values.get("ticker", ""))
+                request_options = dict(
+                    min_dte=int(values.get("min_dte", "")),
                     max_dte=int(values.get("max_dte", "")),
                     min_safety_margin=float(values.get("min_safety_margin", "")) / 100,
                     min_abs_delta=float(values.get("min_abs_delta", "")),
                     max_abs_delta=float(values.get("max_abs_delta", "")), fake=values["mode"] == "fake",
                     historical_period=HistoricalPeriod(values.get("historical_period", "6m")),
                 )
-                result = scanner.run(request, base_url=base_url, allow_insecure_tls=True)
+                if len(tickers) == 1:
+                    result = scanner.run(ScanRequest(ticker=tickers[0], **request_options),
+                                         base_url=base_url, allow_insecure_tls=True)
+                else:
+                    # WSGI responses are not streamed. Run conservatively and isolate
+                    # failures; internal contract_workers are deliberately untouched.
+                    def scan_one(ticker):
+                        try:
+                            item = scanner.run(ScanRequest(ticker=ticker, **request_options),
+                                               base_url=base_url, allow_insecure_tls=True)
+                            return ticker, item, None
+                        except NotAuthenticatedError:
+                            return ticker, None, "Sesión de IBKR no autenticada."
+                        except GatewayUnavailableError:
+                            return ticker, None, "Client Portal Gateway no está disponible."
+                        except IbkrError:
+                            return ticker, None, "IBKR no pudo completar este ticker."
+                        except Exception:
+                            logger.exception("Unexpected multi-ticker scan failure for %s", ticker)
+                            return ticker, None, "No se pudo completar este ticker."
+                    with ThreadPoolExecutor(max_workers=ticker_workers,
+                                            thread_name_prefix="ticker-scan") as executor:
+                        # executor.map preserves input order while limiting active scans.
+                        multi_results = tuple(executor.map(scan_one, tickers))
             except (ValueError, KeyError):
                 error, status = "Revisa los parámetros del formulario e inténtalo de nuevo.", "400 Bad Request"
             except NotAuthenticatedError:
@@ -455,7 +541,7 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
             except Exception:
                 logger.exception("Unexpected web scan failure")
                 error, status = "No se pudo completar el scan. Inténtalo de nuevo.", "500 Internal Server Error"
-        body = render_page(values, result, error)
+        body = render_page(values, result, error, multi_results)
         start_response(status, [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body))),
                                 ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff")])
         return [body]
