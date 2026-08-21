@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from html import escape
-from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import re
@@ -20,6 +19,7 @@ from options_scanner.technical_check import (DEFAULT_TICKERS, TechnicalCheckResu
                                              _svg_chart, _visible_zones, check_tickers)
 from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
 from options_scanner.models import User, Watchlist
+from options_scanner.multi_scan import MultiScanMetrics, run_multi_ticker
 from options_scanner.workspace import UserWorkspaceStore
 
 logger = logging.getLogger(__name__)
@@ -217,6 +217,10 @@ def _summary(result: ScanResult | None) -> str:
         ("Validaciones fallidas", s.contract_validations_failed),
         ("Latencia secdef/info media/p50/p95", f"{s.secdef_info_latency_mean_ms:.1f}/{s.secdef_info_latency_p50_ms:.1f}/{s.secdef_info_latency_p95_ms:.1f} ms"),
         ("Concurrencia máxima observada", s.max_concurrent_contract_requests),
+        ("Resolución subyacente", f"{phase.get('underlying_resolution', 0):.3f} s"),
+        ("Histórico", f"{phase.get('historical_data', 0):.3f} s"),
+        ("Análisis técnico", f"{phase.get('technical_analysis', 0):.3f} s"),
+        ("HTTP por endpoint", ", ".join(f"{name}={count}" for name, count in sorted(s.http_calls.items())) or "ninguna"),
     )
     cards = "".join(
         f"<div><dt>{escape(label)}</dt><dd>{escape(str(value))}</dd></div>" for label, value in items
@@ -419,7 +423,8 @@ def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
     return f'<section class="technical" data-ticker="{escape(context.symbol)}">{summary}<details id="{identity}"><summary><span aria-hidden="true">▥</span> Ver gráfico</summary><div class="chart-panel"><div class="period-selector" aria-label="Periodo histórico">{buttons}</div>{svg}{explanation}<div class="technical-context"><ul>{strike_messages}</ul><p class="disclaimer">Las zonas se derivan del comportamiento histórico del precio y no garantizan reacciones futuras. Son contexto informativo y no constituyen una recomendación de inversión.</p></div></div></details></section>'
 
 
-def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]) -> str:
+def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...],
+                    metrics: MultiScanMetrics | None = None) -> str:
     """Render comparison only; candidate ranking remains isolated per ticker."""
     rows = []
     with_candidates = errors = 0
@@ -467,8 +472,11 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
     headings = ('Ticker','Precio','Estado','S1','Distancia S1','Fuerza S1','Candidatos','Mejor strike','Delta','Premium yield','Annualized yield')
     headers = ''.join(f'<th>{f"<button type=\"button\" class=\"sort-button\" data-column=\"{i}\" data-kind=\"{sortable[i]}\">{h} <span aria-hidden=\"true\">↕</span></button>" if i in sortable else h}</th>' for i, h in enumerate(headings))
     total = len(items)
+    timing = (f' · total {metrics.elapsed_seconds:.1f} s · ticker p50/p95 '
+              f'{metrics.ticker_seconds_p50:.1f}/{metrics.ticker_seconds_p95:.1f} s'
+              if metrics else f' · {elapsed:.1f} s')
     return ('<section class="screener" aria-labelledby="screener-title"><h2 id="screener-title">Screener multi-ticker</h2>'
-            f'<div class="scan-summary" role="status">{total} tickers · {with_candidates} con candidatos · {total-with_candidates-errors} sin candidatos · {elapsed:.1f} s · {errors} error</div>'
+            f'<div class="scan-summary" role="status">{total} tickers · {with_candidates} con candidatos · {total-with_candidates-errors} sin candidatos{timing} · {errors} error</div>'
             '<div class="quick-filters" role="group" aria-label="Filtros rápidos"><button type="button" class="active" data-filter="all">Todos</button><button type="button" data-filter="has-candidates">Con candidatos</button><button type="button" data-filter="no-candidates">Sin candidatos</button><button type="button" data-filter="strong">Soporte fuerte</button><button type="button" data-filter="near">Cerca de S1</button></div>'
             '<div class="scroll"><table class="screener-table"><thead><tr>' + headers + '<th>Acción</th>' +
             '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></section>')
@@ -476,6 +484,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
 
 def render_page(values: dict[str, str] | None = None, result: ScanResult | None = None, error: str | None = None,
                 multi_results: tuple[tuple[str, ScanResult | None, str | None], ...] = (),
+                multi_metrics: MultiScanMetrics | None = None,
                 watchlists: dict[str, Watchlist] | None = None,
                 watchlist_message: str | None = None) -> bytes:
     v = {"ticker": "NVDA", "min_dte": "30", "max_dte": "45", "min_safety_margin": "20",
@@ -501,7 +510,7 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
         <button name="action" value="watchlist_delete" type="submit" class="danger">Eliminar</button></form>'''
         for item in (watchlists or {}).values()
     )
-    table = _multi_screener(multi_results) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
+    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
     html = f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Options Scanner</title><style>
 body{{font:15px system-ui;margin:0;background:#f4f6fa;color:#182033}}main{{max-width:1500px;margin:auto;padding:2rem}}h1{{margin:0}}.note{{color:#556}}.top{{display:flex;justify-content:space-between;gap:1rem;align-items:start}}.connection{{background:white;padding:.7rem;border-radius:8px;min-width:220px}}.dot{{display:inline-block;width:.75rem;height:.75rem;border-radius:50%;background:#818895;margin-right:.4rem}}.connected .dot{{background:#198754}}.login .dot{{background:#e58a00}}.disconnected .dot{{background:#c52d36}}.demo .dot{{background:#818895}}.connection button{{font-size:.8rem;padding:.35rem .6rem;margin-top:.4rem}}.connection small{{display:block;color:#596273;margin-top:.25rem}}
 form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padding:1.25rem;border-radius:10px;box-shadow:0 2px 8px #0001}}label{{display:grid;gap:.35rem;font-weight:600}}input{{padding:.55rem;border:1px solid #aab3c5;border-radius:5px;width:9rem}}button{{background:#2358d5;color:white;border:0;border-radius:5px;padding:.7rem 1.4rem;font-weight:700;cursor:pointer}}button:disabled{{cursor:not-allowed;opacity:.65}}button.danger{{background:#a52832}}.mode{{display:flex;align-items:center;gap:.4rem}}.mode input{{width:auto}}.watchlists{{background:white;padding:1rem;border-radius:10px}}.watchlist-row{{box-shadow:none;border-top:1px solid #dde2ea;border-radius:0;padding:.8rem 0}}.watchlist-row input[name="watchlist_tickers"]{{width:20rem}}
@@ -537,11 +546,14 @@ document.addEventListener('toggle',async event=>{{const details=event.target;if(
 
 
 def create_app(service: PutScanService | None = None, *, base_url: str = "https://localhost:5000/v1/api", status_transport: object | None = None,
-               technical_price_provider=None, technical_history_provider=None, ticker_workers: int = 1,
+               technical_price_provider=None, technical_history_provider=None, ticker_workers: int = 3,
+               global_http_limit: int = 8,
                watchlists: dict[str, tuple[str, ...]] | None = None,
                workspace_store: UserWorkspaceStore | None = None, user: User | None = None):
-    if ticker_workers not in (1, 2):
-        raise ValueError("ticker_workers debe ser 1 o 2")
+    if not 1 <= ticker_workers <= 4:
+        raise ValueError("ticker_workers debe estar entre 1 y 4")
+    if not 1 <= global_http_limit <= 16:
+        raise ValueError("global_http_limit debe estar entre 1 y 16")
     scanner = service or PutScanService()
     transport = status_transport or __import__("options_scanner.ibkr", fromlist=["ClientPortalTransport"]).ClientPortalTransport(base_url, allow_insecure_tls=True, timeout=2.0)
     technical_cache: dict[str, TechnicalCheckResult] = {}
@@ -588,6 +600,7 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
         values: dict[str, str] = {}
         result = None
         multi_results: tuple[tuple[str, ScanResult | None, str | None], ...] = ()
+        multi_metrics = None
         error = None
         watchlist_message = None
         status = "200 OK"
@@ -633,27 +646,23 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                     result = scanner.run(ScanRequest(ticker=tickers[0], **request_options),
                                          base_url=base_url, allow_insecure_tls=True)
                 else:
-                    # WSGI responses are not streamed. Run conservatively and isolate
-                    # failures; internal contract_workers are deliberately untouched.
-                    def scan_one(ticker):
-                        try:
-                            item = scanner.run(ScanRequest(ticker=ticker, **request_options),
-                                               base_url=base_url, allow_insecure_tls=True)
-                            scan_cache[ticker] = item
-                            return ticker, item, None
-                        except NotAuthenticatedError:
-                            return ticker, None, "Sesión de IBKR no autenticada."
-                        except GatewayUnavailableError:
-                            return ticker, None, "Client Portal Gateway no está disponible."
-                        except IbkrError:
-                            return ticker, None, "IBKR no pudo completar este ticker."
-                        except Exception:
-                            logger.exception("Unexpected multi-ticker scan failure for %s", ticker)
-                            return ticker, None, "No se pudo completar este ticker."
-                    with ThreadPoolExecutor(max_workers=ticker_workers,
-                                            thread_name_prefix="ticker-scan") as executor:
-                        # executor.map preserves input order while limiting active scans.
-                        multi_results = tuple(executor.map(scan_one, tickers))
+                    def scan_one(ticker, limiter):
+                        item = scanner.run(ScanRequest(ticker=ticker, **request_options),
+                                           base_url=base_url, allow_insecure_tls=True,
+                                           work_limiter=limiter)
+                        scan_cache[ticker] = item
+                        return item
+                    raw_results, multi_metrics = run_multi_ticker(
+                        tickers, scan_one, ticker_workers=ticker_workers,
+                        global_http_limit=global_http_limit)
+                    def safe_error(ticker, exc):
+                        if isinstance(exc, NotAuthenticatedError): return "Sesión de IBKR no autenticada."
+                        if isinstance(exc, GatewayUnavailableError): return "Client Portal Gateway no está disponible."
+                        if isinstance(exc, IbkrError): return "IBKR no pudo completar este ticker."
+                        logger.error("Unexpected multi-ticker scan failure for %s (%s)", ticker, type(exc).__name__)
+                        return "No se pudo completar este ticker."
+                    multi_results = tuple((ticker, item, None if exc is None else safe_error(ticker, exc))
+                                          for ticker, item, exc in raw_results)
             except StopIteration:
                 pass
             except (ValueError, KeyError):
@@ -668,7 +677,8 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                 logger.exception("Unexpected web scan failure")
                 error, status = "No se pudo completar el scan. Inténtalo de nuevo.", "500 Internal Server Error"
         current_watchlists = {item.id: item for item in store.watchlists_for(current_user.id)}
-        body = render_page(values, result, error, multi_results, current_watchlists, watchlist_message)
+        body = render_page(values, result, error, multi_results, multi_metrics,
+                           current_watchlists, watchlist_message)
         start_response(status, [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body))),
                                 ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff")])
         return [body]

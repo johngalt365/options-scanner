@@ -96,14 +96,18 @@ class ClientPortalTransport:
         *,
         allow_insecure_tls: bool = False,
         timeout: float = 10.0,
+        work_limiter: threading.BoundedSemaphore | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._ssl_context = ssl._create_unverified_context() if allow_insecure_tls else ssl.create_default_context()
+        self._work_limiter = work_limiter
 
     def get(self, path: str, params: Mapping[str, str]) -> Any:
         query = urlencode(params)
         url = f"{self.base_url}/{path.lstrip('/')}" + (f"?{query}" if query else "")
+        if self._work_limiter is not None:
+            self._work_limiter.acquire()
         try:
             with urlopen(Request(url, headers={"Accept": "application/json"}), timeout=self.timeout, context=self._ssl_context) as response:
                 return json.load(response)
@@ -116,6 +120,9 @@ class ClientPortalTransport:
             raise GatewayUnavailableError(f"no se pudo conectar con Client Portal Gateway: {exc}") from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise GatewayUnavailableError("Gateway devolvió una respuesta que no es JSON válido") from exc
+        finally:
+            if self._work_limiter is not None:
+                self._work_limiter.release()
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +262,10 @@ class IbkrMarketDataProvider:
         self.http_call_counts["/".join(endpoint)] += 1
         return self._transport.get(path, params)
 
+    def get(self, path: str, params: Mapping[str, str]) -> Any:
+        """Expose the counted transport boundary to internal provider adapters."""
+        return self._get(path, params)
+
     def require_authenticated_session(self) -> None:
         data = self._get("/iserver/auth/status", {})
         if not isinstance(data, Mapping) or not data.get("authenticated"):
@@ -268,7 +279,7 @@ class IbkrMarketDataProvider:
         # redundant secdef request, this prevents an ambiguous symbol search from
         # selecting a different listing for history.
         adapter = IbkrHistoricalDataProvider(
-            self._transport,
+            self,
             lambda value: self.last_underlying_conid or self.locate_stock(value)[0],
         )
         bars = adapter.get_historical_bars(symbol, period)
