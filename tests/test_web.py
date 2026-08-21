@@ -237,7 +237,15 @@ class WebTest(TestCase):
             self.assertIn(f'aria-describedby="{help_id}"', page)
             self.assertIn(f'id="{help_id}" role="tooltip"', page)
         self.assertIn('id="help-history" role="tooltip"', page)
-        self.assertIn("Ventana histórica utilizada para calcular soportes y resistencias del underlying.", page)
+        for history_help_text in (
+            "3M / 6M / 1A: analizan soportes y resistencias utilizando únicamente ese horizonte histórico.",
+            "Multi: analiza independientemente 3M, 6M y 1A y busca confluencias",
+            "Una confluencia 3/3 significa que los tres horizontes presentan una zona solapada; "
+            "2/3, que coinciden dos de los tres.",
+            "El horizonte histórico afecta únicamente al contexto técnico del underlying.",
+            "No modifica DTE, Delta, Theta, IV ni los demás criterios del screening de opciones.",
+        ):
+            self.assertIn(history_help_text, page)
         self.assertNotIn("En una Short PUT, theta positivo", page)
         for help_text in (
             "Días restantes hasta el vencimiento de la opción.",
