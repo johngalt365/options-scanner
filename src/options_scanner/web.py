@@ -245,6 +245,33 @@ def _evaluation_detail(candidate) -> str:
             f'<p><strong>Debilidades:</strong> {escape(weaknesses)}.</p>{missing}</details>')
 
 
+def _evaluation_section(candidate) -> str:
+    """Render the evaluation already attached to the selected candidate."""
+    if candidate is None or candidate.evaluation is None:
+        return ""
+    e = candidate.evaluation
+    strengths = "; ".join(e.strengths) or "Sin fortalezas destacadas por las reglas v1"
+    weaknesses = "; ".join(e.weaknesses) or "Sin debilidades destacadas por las reglas v1"
+    missing = ", ".join(e.missing_data) or "Ninguno"
+    return (
+        '<section class="short-put-evaluation" aria-labelledby="short-put-evaluation-title">'
+        '<h2 id="short-put-evaluation-title">Evaluación Short PUT</h2>'
+        '<dl class="evaluation-scores">'
+        f'<div><dt>Riesgo</dt><dd>{e.risk_score:.2f}/30</dd></div>'
+        f'<div><dt>Técnico</dt><dd>{e.technical_score:.2f}/25</dd></div>'
+        f'<div><dt>Prima / IV</dt><dd>{e.premium_score:.2f}/20</dd></div>'
+        f'<div><dt>Theta</dt><dd>{e.theta_score:.2f}/15</dd></div>'
+        f'<div><dt>Liquidez</dt><dd>{e.liquidity_score:.2f}/10</dd></div>'
+        f'<div class="evaluation-total"><dt>Total</dt><dd>{e.total_score:.2f}/100 · {escape(e.label)}</dd></div>'
+        '</dl>'
+        f'<p><strong>Spread relativo:</strong> {_percent(candidate.relative_spread)}</p>'
+        f'<p><strong>Fortalezas:</strong> {escape(strengths)}.</p>'
+        f'<p><strong>Debilidades:</strong> {escape(weaknesses)}.</p>'
+        f'<p><strong>Datos ausentes que reducen la confianza:</strong> {escape(missing)}.</p>'
+        '</section>'
+    )
+
+
 def _rows(result: ScanResult | None) -> str:
     if result is None:
         return ""
@@ -564,8 +591,8 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
     multi_mode = any(result and result.technical_context and
                      result.technical_context.period == HistoricalPeriod.MULTI
                      for _, result, _ in items)
-    sortable = {0: "text", 1: "number", 4: "number", 6: "number", 7: "number", 8: "number", 9: "number", 10: "number",
-                11: "number", 12: "number", 13: "number", 14: "number", 15: "number", 16: "number", 17: "number"}
+    sortable = {0: "text", 1: "number", 3: "number", 6: "number", 8: "number", 9: "number", 10: "number", 11: "number",
+                12: "number", 13: "number", 14: "number", 15: "number", 16: "number", 17: "number", 18: "number"}
     def badge(state: str | None) -> str:
         value = state or "N/D"
         lowered = value.lower()
@@ -609,6 +636,8 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                 )
             cells = (
                 (f'<button type="button" class="ticker-link detail-trigger" aria-label="Ver detalle de {escape(ticker)}">{escape(ticker)}</button>', ticker),
+                (_number(best.evaluation.total_score) if best and best.evaluation else "N/D", best.evaluation.total_score if best and best.evaluation else ""),
+                (escape(best.evaluation.label) if best and best.evaluation else "N/D", best.evaluation.label if best and best.evaluation else ""),
                 (f"${result.underlying_price:,.2f}" if result.underlying_price is not None else "N/D", result.underlying_price),
                 (badge(result.market_data_status), ""),
                 *legacy_values,
@@ -623,14 +652,13 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                 (f"{best.premium_yield*100:.2f} %" if best and best.premium_yield is not None else "N/D", best.premium_yield if best and best.premium_yield is not None else ""),
                 (f"{best.annualized_premium_yield*100:.2f} %" if best and best.annualized_premium_yield is not None else "N/D", best.annualized_premium_yield if best and best.annualized_premium_yield is not None else ""),
                 (_number(best.open_interest) if best else "N/D", best.open_interest if best else ""),
-                (_number(best.evaluation.total_score) if best and best.evaluation else "N/D", best.evaluation.total_score if best and best.evaluation else ""),
-                (escape(best.evaluation.label) if best and best.evaluation else "N/D", best.evaluation.label if best and best.evaluation else ""),
                 ((relationship.position_label if multi_mode and context else _strike_context_label(best))
                  if best else "N/D",
                  (relationship.position_label if best and multi_mode and context else
                   _strike_context_label(best) if best else "")),
             )
             detail = (_result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
+                      _evaluation_section(best) +
                       (f'<p class="strike-explanation">{escape(_strike_support_explanation(best, context))}</p>' if best else '') +
                       '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
                       ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Score','Evaluación','Desglose','Contexto técnico')) +
@@ -653,9 +681,9 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
         rows.append(f'<tr data-ticker="{escape(ticker)}" class="{row_class}">{opener}{rendered}<td><details class="ticker-detail"><summary>Ver detalle</summary><div class="detail-panel"><button type="button" class="detail-close" aria-label="Cerrar detalle de {escape(ticker)}">Cerrar</button>{detail}</div></details></td></tr>')
     context_headings = (('Confluencia soporte','Horizontes','Strike vs soporte') if multi_mode
                         else ('S1','Distancia S1','Fuerza S1'))
-    headings = ('Ticker','Precio','Estado',*context_headings,'Candidatos',
+    headings = ('Ticker','Score','Evaluación','Precio','Estado',*context_headings,'Candidatos',
                 'Strike','DTE','Distancia al strike','Delta','Theta short','Theta %/día','IV',
-                'Premium yield','Annualized yield','Open interest','Score','Evaluación','Contexto técnico del strike')
+                'Premium yield','Annualized yield','Open interest','Contexto técnico del strike')
     headers = []
     for i, heading in enumerate(headings):
         content = heading
@@ -704,7 +732,7 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
         <button name="action" value="watchlist_delete" type="submit" class="danger">Eliminar</button></form>'''
         for item in (watchlists or {}).values()
     )
-    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Score','Evaluación','Desglose','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
+    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}{_evaluation_section(result.candidates[0] if result.candidates else None)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Score','Evaluación','Desglose','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
     def help_icon(identifier: str, title: str, explanation: str) -> str:
         """Return an accessible, layout-independent educational tooltip."""
         return (f'<span class="filter-help"><button class="help-trigger" type="button" '
@@ -735,6 +763,7 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
 body{{font:15px system-ui;margin:0;background:#f4f6fa;color:#182033}}main{{max-width:1500px;margin:auto;padding:2rem}}h1{{margin:0}}.note{{color:#556}}.top{{display:flex;justify-content:space-between;gap:1rem;align-items:start}}.connection{{background:white;padding:.7rem;border-radius:8px;min-width:220px}}.dot{{display:inline-block;width:.75rem;height:.75rem;border-radius:50%;background:#818895;margin-right:.4rem}}.connected .dot{{background:#198754}}.login .dot{{background:#e58a00}}.disconnected .dot{{background:#c52d36}}.demo .dot{{background:#818895}}.connection button{{font-size:.8rem;padding:.35rem .6rem;margin-top:.4rem}}.connection small{{display:block;color:#596273;margin-top:.25rem}}
 form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padding:1.25rem;border-radius:10px;box-shadow:0 2px 8px #0001}}label{{display:grid;gap:.35rem;font-weight:600}}input{{padding:.55rem;border:1px solid #aab3c5;border-radius:5px;width:9rem}}button{{background:#2358d5;color:white;border:0;border-radius:5px;padding:.7rem 1.4rem;font-weight:700;cursor:pointer}}button:disabled{{cursor:not-allowed;opacity:.65}}button.danger{{background:#a52832}}.mode{{display:flex;align-items:center;gap:.4rem}}.mode input{{width:auto}}.watchlists{{background:white;padding:1rem;border-radius:10px}}.watchlist-row{{box-shadow:none;border-top:1px solid #dde2ea;border-radius:0;padding:.8rem 0}}.watchlist-row input[name="watchlist_tickers"]{{width:20rem}}
 .interpretation{{background:white;padding:1rem 1.2rem;border-radius:8px;border-left:4px solid #60708c;margin-top:1rem}}.interpretation h2{{margin-top:0}}.interpretation-message{{margin:.45rem 0;padding:.45rem .65rem;border-radius:4px}}.interpretation-message.success{{background:#e9f7ef;border-left:3px solid #198754}}.interpretation-message.neutral{{background:#eef3fb;border-left:3px solid #60708c}}.interpretation-message.warning{{background:#fff7db;border-left:3px solid #d18a00}}.interpretation-message.error{{background:#fff0f0;border-left:3px solid #c22}}.interpretation ul{{margin-bottom:0}}.interpretation dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem}}.interpretation dl div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}
+.short-put-evaluation{{background:white;padding:1rem 1.2rem;border-radius:8px;border-left:4px solid #2358d5}}.short-put-evaluation h2{{margin-top:0}}.evaluation-scores{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.6rem}}.evaluation-scores>div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}.evaluation-scores .evaluation-total{{background:#eaf1ff}}
 .technical{{background:white;padding:1rem;border-radius:8px}}.technical-title h2{{margin:0 0 .8rem}}.technical-metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:0}}.technical-metrics>div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}.technical details{{border-top:1px solid #dde2ea;padding-top:.7rem}}.technical details>summary{{color:#2358d5;width:max-content}}.chart-panel{{margin-top:.8rem}}.period-selector{{display:flex;gap:.35rem;margin-bottom:.6rem}}.period-button{{padding:.4rem .7rem;background:#e7ebf3;color:#263451}}.period-button.active{{background:#2358d5;color:white}}.technical svg{{width:100%;height:360px;background:#fafbfd;border:1px solid #dce2ec}}.price{{fill:none;stroke:#254fbd;stroke-width:2}}.zone.support{{fill:#2ca66f}}.zone.resistance{{fill:#db5a55}}.zone.weak{{opacity:.10}}.zone.medium{{opacity:.18}}.zone.strong{{opacity:.27}}.zone-label{{font-weight:800;font-size:14px}}.support-label{{fill:#176b48}}.resistance-label{{fill:#9b302c}}.grid{{stroke:#dfe4ec;stroke-width:1}}.axis-tick{{stroke:#778196}}.axis-label{{fill:#596273;font-size:11px}}.current-label{{fill:#182033;font-size:12px;font-weight:700}}.current{{stroke:#182033;stroke-width:1.5;stroke-dasharray:7 4}}.strike{{stroke:#8b55bb;stroke-width:1;stroke-dasharray:3 4}}.zone-strength{{display:block;font-size:.8rem;font-weight:500;text-transform:capitalize}}.zone-table-wrap{{overflow:auto;margin-top:.8rem}}.zone-table{{font-size:.9rem}}.zone-table th{{background:#eef1f6;color:#263451}}.technical-context{{background:#f6f8fb;padding:.8rem 1rem;margin-top:.7rem}}.history-unavailable{{background:#fff7db;border-left:4px solid #d18a00;padding:.75rem;margin-top:.8rem}}.history-unavailable p{{margin:.3rem 0 0}}.disclaimer{{color:#596273;font-size:.9rem}}
 .candidate-technical{{margin:0;min-width:10rem;text-align:left}}.candidate-technical summary{{white-space:nowrap}}.candidate-technical dl{{display:grid;grid-template-columns:repeat(2,minmax(7rem,1fr));gap:.35rem;margin:.6rem 0 0}}.candidate-technical dl div{{white-space:normal;background:#f4f6fa;padding:.35rem}}.candidate-technical dd{{font-size:.9rem}}.technical-compact{{font-weight:650}}
 .required-note,.required-mark{{color:#9b302c}}.sr-only{{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}}.confluence-summary{{margin:.8rem 0;padding:.7rem;background:#f6f8fb;border-radius:6px}}.confluence-summary h3{{margin:0}}.scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.scan-legend{{font-size:.8rem;color:#596273}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error,.row-error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.screener table{{font-size:.86rem}}.ticker-detail{{margin:0;text-align:left}}.detail-panel{{position:fixed;inset:5%;z-index:3;background:#f4f6fa;padding:1.2rem;box-shadow:0 8px 40px #0005;overflow:auto;white-space:normal}}.candidate-table{{font-size:.82rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
@@ -759,7 +788,7 @@ document.addEventListener('click',event=>{{const button=event.target.closest('.p
 document.addEventListener('click',event=>{{
  const close=event.target.closest('.detail-close');if(close){{close.closest('.ticker-detail').open=false;return}}
  const trigger=event.target.closest('.detail-trigger');if(trigger){{const details=trigger.closest('tr').querySelector('.ticker-detail');details.open=true;details.querySelector('.detail-close').focus();return}}
- const filter=event.target.closest('[data-filter]');if(filter){{document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b===filter));document.querySelectorAll('.screener-table tbody tr').forEach(row=>{{const distance=parseFloat(row.cells[5]?.dataset.sortValue),strength=row.cells[6]?.textContent.toLowerCase();row.hidden=!(filter.dataset.filter==='all'||row.classList.contains(filter.dataset.filter)||(filter.dataset.filter==='strong'&&strength.includes('fuerte'))||(filter.dataset.filter==='near'&&Number.isFinite(distance)&&Math.abs(distance)<=3))}});return}}
+ const filter=event.target.closest('[data-filter]');if(filter){{document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b===filter));document.querySelectorAll('.screener-table tbody tr').forEach(row=>{{const distance=parseFloat(row.cells[7]?.dataset.sortValue),strength=row.cells[8]?.textContent.toLowerCase();row.hidden=!(filter.dataset.filter==='all'||row.classList.contains(filter.dataset.filter)||(filter.dataset.filter==='strong'&&strength.includes('fuerte'))||(filter.dataset.filter==='near'&&Number.isFinite(distance)&&Math.abs(distance)<=3))}});return}}
  const sort=event.target.closest('.sort-button');if(sort){{const table=sort.closest('table'),body=table.tBodies[0],column=Number(sort.dataset.column)+1,ascending=sort.dataset.direction!=='asc';document.querySelectorAll('.sort-button').forEach(b=>delete b.dataset.direction);sort.dataset.direction=ascending?'asc':'desc';const rows=Array.from(body.rows);rows.sort((a,b)=>{{let x=a.cells[column].dataset.sortValue,y=b.cells[column].dataset.sortValue;if(sort.dataset.kind==='number'){{x=x===''?Number.POSITIVE_INFINITY:Number(x);y=y===''?Number.POSITIVE_INFINITY:Number(y);return (x-y)*(ascending?1:-1)}}return x.localeCompare(y,undefined,{{numeric:true}})*(ascending?1:-1)}}).forEach(row=>body.append(row));}}
 }});
 document.addEventListener('toggle',async event=>{{

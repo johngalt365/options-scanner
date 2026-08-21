@@ -2,7 +2,8 @@ from io import BytesIO
 from unittest import TestCase
 
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
-from options_scanner.scan_service import DiscardedContract, ScanMetrics, ScanResult
+from options_scanner.scan_service import (DiscardedContract, PutScanService, ScanMetrics,
+                                          ScanRequest, ScanResult)
 from options_scanner.scanner import PutScanCandidate
 from options_scanner.web import (_directional_distance, _interpretation, _multi_screener, _rows, create_app, ibkr_connection_status, parse_tickers,
                                  render_page, render_technical_screener, resolve_universe)
@@ -17,6 +18,35 @@ from options_scanner.historical import HistoricalPeriod
 from datetime import date
 from options_scanner.models import User
 from options_scanner.workspace import UserWorkspaceStore
+
+
+def test_ranked_evaluation_reaches_single_and_multi_renderers_end_to_end():
+    result = PutScanService(today=lambda: date(2026, 8, 20)).run(
+        ScanRequest(ticker="NVDA", fake=True, historical_period=HistoricalPeriod.MULTI)
+    )
+    best = result.candidates[0]
+    evaluation = best.evaluation
+
+    assert evaluation is not None
+    single = render_page(values={"ticker": "AEHR"}, result=result).decode()
+    multi = render_page(multi_results=(("AEHR", result, None),)).decode()
+
+    # The service-owned evaluation, rather than a renderer calculation, feeds
+    # the row, contract table, and selected-candidate explanation.
+    for page in (single, multi):
+        assert "Evaluación Short PUT" in page
+        assert f"{evaluation.total_score:.2f}/100 · {evaluation.label}" in page
+        assert f"{evaluation.risk_score:.2f}/30" in page
+        assert f"{evaluation.technical_score:.2f}/25" in page
+        assert f"{evaluation.premium_score:.2f}/20" in page
+        assert f"{evaluation.theta_score:.2f}/15" in page
+        assert f"{evaluation.liquidity_score:.2f}/10" in page
+        assert "Spread relativo:" in page
+        assert "Fortalezas:" in page
+        assert "Debilidades:" in page
+        assert "Datos ausentes que reducen la confianza:" in page
+    assert '<th class="detail-launch"><span class="sr-only">Abrir detalle</span></th><th><button type="button" class="sort-button" data-column="0" data-kind="text">Ticker' in multi
+    assert 'class="sort-button" data-column="1" data-kind="number">Score' in multi
 
 
 def request(app, method="GET", body=""):
