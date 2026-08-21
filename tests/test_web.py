@@ -205,18 +205,37 @@ class WebTest(TestCase):
             self.assertIn(f"<legend>{group}</legend>", page)
         self.assertIn('class="control-label">Distancia mínima<br>al strike (%)', page)
         self.assertIn('class="control-label">Theta short<br>mínimo', page)
+        self.assertEqual(page.count('class="help-trigger"'), 7)
+        self.assertEqual(page.count('role="tooltip"'), 7)
+        for help_id in ("help-min-dte", "help-max-dte", "help-distance", "help-min-delta",
+                        "help-max-delta", "help-iv", "help-theta"):
+            self.assertIn(f'aria-describedby="{help_id}"', page)
+            self.assertIn(f'id="{help_id}" role="tooltip"', page)
         for help_text in (
-            "Días hasta vencimiento",
-            "Distancia porcentual entre underlying y strike",
-            "Se filtra por valor absoluto de delta",
-            "Volatilidad implícita contractual mínima",
-            "Exposición temporal favorable mínima para la posición corta",
+            "Días restantes hasta el vencimiento de la opción.",
+            "Mayor distancia proporciona mayor colchón, normalmente a cambio de menor prima.",
+            "0,15–0,30 es el rango base actualmente utilizado.",
+            "no es una probabilidad exacta.",
+            "Una IV alta no significa automáticamente mejor oportunidad.",
+            "sin usar abs().",
+            "no representa beneficio diario garantizado.",
         ):
-            self.assertIn(f'title="{help_text}"', page)
+            self.assertIn(help_text, page)
+        self.assertIn('.filter-help:hover .help-tooltip,.filter-help:focus-within .help-tooltip', page)
+        self.assertIn('position:absolute', page)
         self.assertIn('class="form-actions"', page)
         self.assertIn('.control-label{display:flex;min-height:2.1em;align-items:flex-end', page)
         self.assertIn('@media(max-width:1100px)', page)
         self.assertIn('@media(max-width:430px)', page)
+
+    def test_filter_reference_is_keyboard_native_and_exclusively_educational(self):
+        page = render_page().decode()
+
+        self.assertIn('<details class="filter-reference"><summary>ⓘ Cómo interpretar los filtros</summary>', page)
+        for metric in ("Delta", "Theta short", "Theta %/día", "IV", "Vega"):
+            self.assertIn(f'<th scope="row">{metric}</th>', page)
+        self.assertIn("Es una aproximación, no una rentabilidad diaria garantizada.", page)
+        self.assertNotIn('data-filter="vega"', page)
 
     def test_watchlist_crud_selection_validation_and_user_isolation(self):
         store = UserWorkspaceStore()
