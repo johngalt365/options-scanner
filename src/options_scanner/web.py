@@ -388,8 +388,12 @@ def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
 
     last_session = context.bars[-1].session.isoformat() if context and context.bars else "N/D"
     identity = "technical-" + "".join(ch for ch in (context.symbol if context else "result") if ch.isalnum()).lower()
-    zone_cards = "".join(metric(f"S{i}", z) for i, z in enumerate(supports, 1))
-    zone_cards += "".join(metric(f"R{i}", z) for i, z in enumerate(resistances, 1))
+    # Keep the five canonical slots visible even when the analysis found fewer
+    # zones.  This is presentation only: the stored context remains untouched.
+    zone_cards = "".join(metric(f"S{i + 1}", supports[i] if i < len(supports) else None)
+                         for i in range(3))
+    zone_cards += "".join(metric(f"R{i + 1}", resistances[i] if i < len(resistances) else None)
+                          for i in range(2))
     summary = (
         '<div class="technical-title"><h2>Contexto técnico</h2></div><dl class="technical-metrics">'
         f'<div><dt>Precio actual</dt><dd>{f"${current:.2f}" if current is not None else "N/D"}</dd></div>'
@@ -403,7 +407,7 @@ def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
         ticker = escape(context.symbol)
         return (f'<section class="technical" data-ticker="{ticker}">{summary}'
                 f'<details class="lazy-chart" data-chart-url="/scan-chart?ticker={ticker}">'
-                '<summary><span aria-hidden="true">▥</span> Ver gráfico histórico</summary>'
+                '<summary><span aria-hidden="true">▥</span> Ver gráfico</summary>'
                 '<div class="chart-panel" role="status">El gráfico se cargará al abrir.</div>'
                 '</details></section>')
 
@@ -594,7 +598,13 @@ document.addEventListener('click',event=>{{
  const filter=event.target.closest('[data-filter]');if(filter){{document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b===filter));document.querySelectorAll('.screener-table tbody tr').forEach(row=>{{const distance=parseFloat(row.cells[4]?.dataset.sortValue),strength=row.cells[5]?.textContent.toLowerCase();row.hidden=!(filter.dataset.filter==='all'||row.classList.contains(filter.dataset.filter)||(filter.dataset.filter==='strong'&&strength.includes('fuerte'))||(filter.dataset.filter==='near'&&Number.isFinite(distance)&&Math.abs(distance)<=3))}});return}}
  const sort=event.target.closest('.sort-button');if(sort){{const table=sort.closest('table'),body=table.tBodies[0],column=Number(sort.dataset.column),ascending=sort.dataset.direction!=='asc';document.querySelectorAll('.sort-button').forEach(b=>delete b.dataset.direction);sort.dataset.direction=ascending?'asc':'desc';const rows=Array.from(body.rows);rows.sort((a,b)=>{{let x=a.cells[column].dataset.sortValue,y=b.cells[column].dataset.sortValue;if(sort.dataset.kind==='number'){{x=x===''?Number.POSITIVE_INFINITY:Number(x);y=y===''?Number.POSITIVE_INFINITY:Number(y);return (x-y)*(ascending?1:-1)}}return x.localeCompare(y,undefined,{{numeric:true}})*(ascending?1:-1)}}).forEach(row=>body.append(row));}}
 }});
-document.addEventListener('toggle',async event=>{{const details=event.target;if(!details.matches('.lazy-chart')||!details.open||details.dataset.loaded)return;details.dataset.loaded='true';const panel=details.querySelector('.chart-panel');panel.textContent='Cargando gráfico…';try{{const response=await fetch(details.dataset.chartUrl);if(!response.ok)throw new Error();panel.innerHTML=await response.text()}}catch(error){{panel.textContent='Gráfico no disponible.'}}}},true);
+document.addEventListener('toggle',async event=>{{
+ const details=event.target;
+ if(details.matches('.ticker-detail')&&details.open)document.querySelectorAll('.ticker-detail[open]').forEach(item=>{{if(item!==details)item.open=false}});
+ if(!details.matches('.lazy-chart')||!details.open||details.dataset.loaded)return;
+ details.dataset.loaded='true';const panel=details.querySelector('.chart-panel');panel.textContent='Cargando gráfico…';
+ try{{const response=await fetch(details.dataset.chartUrl);if(!response.ok)throw new Error();const doc=new DOMParser().parseFromString(await response.text(),'text/html'),chart=doc.querySelector('.chart-panel');if(!chart)throw new Error();panel.innerHTML=chart.innerHTML}}catch(error){{panel.textContent='Gráfico no disponible.'}}
+}},true);
 </script></main></body></html>'''
     return html.encode()
 
