@@ -43,6 +43,20 @@ class ScanRequestTest(TestCase):
         self.assertIsNotNone(result.updated_at)
         self.assertIsNotNone(result.technical_context)
 
+    def test_fake_scan_preserves_all_filter_reasons_and_counts(self):
+        result = PutScanService(today=lambda: date(2026, 8, 20)).run(ScanRequest(
+            fake=True, min_abs_delta=.25, max_abs_delta=.30,
+            min_iv=.50, min_short_theta=.10,
+        ))
+        self.assertGreater(result.summary.rejected_delta, 0)
+        self.assertGreater(result.summary.rejected_iv, 0)
+        self.assertGreater(result.summary.rejected_theta, 0)
+        reasons = [reason for item in result.summary.discarded_contracts for reason in item.reasons]
+        self.assertTrue(any(reason.startswith("|Delta|") for reason in reasons))
+        self.assertTrue(any(reason.startswith("IV ") for reason in reasons))
+        self.assertTrue(any(reason.startswith("Theta short ") for reason in reasons))
+        self.assertTrue(any("mínimo" in reason and "." in reason for reason in reasons))
+
     def test_history_failure_does_not_invalidate_live_option_scan_or_leak_details(self):
         class Provider:
             last_underlying=Underlying("NVDA",217.77)

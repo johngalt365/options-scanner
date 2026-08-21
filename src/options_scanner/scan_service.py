@@ -50,12 +50,25 @@ class ScanRequest:
 
 
 @dataclass(slots=True)
+class DiscardedContract:
+    """A locally observed contract/strike and every reason it did not qualify."""
+
+    ticker: str
+    expiration: date | None
+    strike: float
+    reasons: tuple[str, ...]
+
+
+@dataclass(slots=True)
 class ScanMetrics:
     considered: int = 0
     complete: int = 0
     incomplete: int = 0
     rejected_margin: int = 0
     rejected_delta: int = 0
+    rejected_dte: int = 0
+    rejected_iv: int = 0
+    rejected_theta: int = 0
     timed_out: bool = False
     timeout_phase: str | None = None
     target_contracts: int = 0
@@ -92,6 +105,7 @@ class ScanMetrics:
     technical_supports_visible: int = 0
     technical_resistances_visible: int = 0
     http_calls: dict[str, int] = field(default_factory=dict)
+    discarded_contracts: list[DiscardedContract] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,11 +152,55 @@ class PutScanService:
             candidates = build_candidates(underlying.current_price, quotes, as_of)
             summary.considered = len(all_quotes)
             summary.complete = len(candidates)
-            summary.rejected_margin = sum(
-                1 for quote in all_quotes
-                if (underlying.current_price - quote.contract.strike) / underlying.current_price < request.min_safety_margin
-            )
-            summary.rejected_delta = max(0, len(all_quotes) - summary.complete - summary.rejected_margin)
+            for quote in all_quotes:
+                contract = quote.contract
+                dte = contract.days_to_expiration(as_of)
+                margin = (underlying.current_price - contract.strike) / underlying.current_price
+                reasons = []
+                if not request.min_dte <= dte <= request.max_dte:
+                    summary.rejected_dte += 1
+                    reasons.append(f"DTE {dte} fuera de {request.min_dte}–{request.max_dte}")
+                if margin < request.min_safety_margin:
+                    summary.rejected_margin += 1
+                    reasons.append(
+                        f"Distancia {margin * 100:.4f}% < mínimo {request.min_safety_margin * 100:.4f}%"
+                    )
+                incomplete = quote.delta is None or quote.bid is None or quote.ask is None
+                if quote.delta is None:
+                    reasons.append("Market data incompleta/no disponible: Delta N/D")
+                elif not request.min_abs_delta <= abs(quote.delta) <= request.max_abs_delta:
+                    summary.rejected_delta += 1
+                    reasons.append(
+                        f"|Delta| {abs(quote.delta):.6f} fuera de "
+                        f"{request.min_abs_delta:.6f}–{request.max_abs_delta:.6f}"
+                    )
+                if request.min_iv is not None:
+                    if quote.implied_volatility is None:
+                        incomplete = True
+                        reasons.append("Market data incompleta/no disponible: IV N/D")
+                    elif quote.implied_volatility < request.min_iv:
+                        summary.rejected_iv += 1
+                        reasons.append(
+                            f"IV {quote.implied_volatility * 100:.4f}% < mínimo {request.min_iv * 100:.4f}%"
+                        )
+                short_theta = None if quote.theta is None else -quote.theta
+                if request.min_short_theta is not None:
+                    if short_theta is None:
+                        incomplete = True
+                        reasons.append("Market data incompleta/no disponible: Theta short N/D")
+                    elif short_theta < request.min_short_theta:
+                        summary.rejected_theta += 1
+                        reasons.append(
+                            f"Theta short {short_theta:.6f} < mínimo {request.min_short_theta:.6f}"
+                        )
+                if quote.bid is None or quote.ask is None:
+                    reasons.append("Market data incompleta/no disponible: bid/ask N/D")
+                if incomplete:
+                    summary.incomplete += 1
+                if reasons:
+                    summary.discarded_contracts.append(DiscardedContract(
+                        request.ticker, contract.expiration, contract.strike, tuple(reasons)
+                    ))
             market_status = "Simulado"
         else:
             # Kept here as a lazy import so legacy imports from scan_puts remain compatible.
