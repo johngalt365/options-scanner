@@ -4,7 +4,7 @@ from unittest import TestCase
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
-from options_scanner.web import create_app, ibkr_connection_status
+from options_scanner.web import _interpretation, create_app, ibkr_connection_status
 from datetime import date
 
 
@@ -47,6 +47,14 @@ class StatusTransport:
 
 
 class WebTest(TestCase):
+    def interpretation(self, **metrics):
+        market_data_status = metrics.pop("market_data_status", None)
+        candidates = metrics.pop("candidates", ())
+        return _interpretation(ScanResult(
+            candidates, ScanMetrics(**metrics), .01,
+            market_data_status=market_data_status,
+        ))
+
     def test_get_renders_form_defaults_and_demo_mode(self):
         status, page = request(create_app(StubService()))
         self.assertEqual(status, "200 OK")
@@ -147,6 +155,64 @@ class WebTest(TestCase):
         self.assertIn("ZBd (Frozen)", page)
         self.assertGreaterEqual(page.count("Cotización congelada / última disponible"), 2)
         self.assertNotIn('<div class="error" role="alert">Frozen', page)
+
+    def test_interpretation_explains_found_candidates_and_ranking(self):
+        candidate = PutScanCandidate(
+            "NVDA", date(2026, 9, 24), 35, 80, 100, .20, 1, 1.2, -.2,
+            -.01, -.04, .08, .30, 100, "RealTime",
+        )
+        block = self.interpretation(candidates=(candidate,), complete=1)
+        self.assertIn("Se encontraron 1 candidatos", block)
+        self.assertIn("Ordenados por rentabilidad anualizada de la prima.", block)
+        self.assertIn('class="interpretation-message success"', block)
+
+    def test_interpretation_explains_zero_candidates_rejected_by_delta(self):
+        block = self.interpretation(rejected_delta=29)
+        self.assertIn("29 contratos quedaron fuera del rango de delta configurado.", block)
+        self.assertIn("Puedes revisar los filtros de delta, DTE o margen", block)
+
+    def test_interpretation_explains_zero_candidates_rejected_by_margin(self):
+        block = self.interpretation(rejected_margin=202)
+        self.assertIn("202 contratos fueron descartados por no alcanzar el margen", block)
+
+    def test_interpretation_explains_incomplete_contracts(self):
+        block = self.interpretation(incomplete=7)
+        self.assertIn("7 contratos no pudieron evaluarse completamente por falta de bid, ask o delta.", block)
+
+    def test_interpretation_explains_partial_timeout_and_pending_count(self):
+        block = self.interpretation(timed_out=True, unresolved_contracts_timeout=11)
+        self.assertIn("El scan terminó con resultados parciales", block)
+        self.assertIn("11 contratos quedaron pendientes.", block)
+        self.assertIn('class="interpretation-message warning"', block)
+
+    def test_interpretation_warns_about_frozen_market_data(self):
+        block = self.interpretation(market_data_status="Frozen")
+        self.assertIn("Los datos de mercado están congelados/última cotización disponible.", block)
+        self.assertIn("Los resultados pueden cambiar cuando el mercado esté activo.", block)
+
+    def test_interpretation_has_no_realtime_warning(self):
+        block = self.interpretation(market_data_status="RealTime")
+        self.assertNotIn("congelados", block)
+        self.assertNotIn('class="interpretation-message warning"', block)
+
+    def test_interpretation_combines_reasons_and_discarded_summary(self):
+        block = self.interpretation(
+            rejected_margin=202, rejected_delta=29, incomplete=7,
+            timed_out=True, unresolved_contracts_timeout=11,
+        )
+        self.assertIn("Ver detalles del análisis", block)
+        self.assertIn("Contratos descartados", block)
+        for label, count in (("Margen", 202), ("Delta", 29), ("Datos incompletos", 7), ("Timeout", 11)):
+            self.assertIn(f"<dt>{label}</dt><dd>{count}</dd>", block)
+
+    def test_interpretation_and_heading_sanitize_market_status(self):
+        malicious = 'Frozen<script>alert("x")</script>'
+        result = ScanResult((), ScanMetrics(), .01, market_data_status=malicious)
+        page = create_app(StubService(result=result))
+        _, rendered = request(page, "POST", FORM)
+        self.assertNotIn(malicious, rendered)
+        self.assertNotIn("<script>alert", rendered)
+        self.assertIn("Frozen&lt;script&gt;", rendered)
 
     def test_invalid_parameters_are_safe(self):
         status, page = request(create_app(StubService()), "POST", FORM.replace("min_dte=30", "min_dte=x"))
