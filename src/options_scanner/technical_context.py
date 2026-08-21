@@ -18,6 +18,46 @@ class StrikePosition(StrEnum):
     BELOW = BELOW_SUPPORT
 
 
+class SupportProximity(StrEnum):
+    """Descriptive price position relative to the upper edge of S1."""
+
+    INSIDE = "Dentro de soporte"
+    VERY_CLOSE = "Muy cerca"
+    CLOSE = "Cerca"
+    FAR = "Alejado"
+    BELOW = "Por debajo"
+
+
+def classify_support_proximity(current_price: float, support: PriceZone | None) -> SupportProximity | None:
+    """Classify proximity to an existing support without creating a zone.
+
+    The thresholds are presentation-only and deliberately do not feed zone
+    detection, scanner filters, scoring, or ranking.
+    """
+    if support is None:
+        return None
+    if current_price < support.lower:
+        return SupportProximity.BELOW
+    if current_price <= support.upper:
+        return SupportProximity.INSIDE
+    distance = (current_price - support.upper) / support.upper * 100
+    if distance <= 2:
+        return SupportProximity.VERY_CLOSE
+    if distance <= 5:
+        return SupportProximity.CLOSE
+    return SupportProximity.FAR
+
+
+def distance_to_zone_percent(current_price: float, zone: PriceZone | None) -> float | None:
+    """Signed distance from price to the closest edge of an existing zone."""
+    if zone is None:
+        return None
+    if zone.lower <= current_price <= zone.upper:
+        return 0.0
+    edge = zone.upper if current_price > zone.upper else zone.lower
+    return (current_price - edge) / edge * 100
+
+
 @dataclass(frozen=True, slots=True)
 class StrikeContext:
     strike: float

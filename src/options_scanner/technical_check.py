@@ -63,6 +63,8 @@ def check_tickers(
                 symbol, period, None, None, "not_requested", _safe_error(exc), "No disponible",
             ))
             continue
+        availability = getattr(price_provider, "last_underlying_market_data_availability", None)
+        market_status = availability.feed if availability is not None else "Disponible"
         try:
             historical_started = clock()
             bars = history_provider.get_historical_bars(symbol, period)
@@ -73,8 +75,6 @@ def check_tickers(
             technical_started = clock()
             context = build_technical_context(symbol, period, bars, price)
             technical_seconds = max(0.0, clock() - technical_started)
-            availability = getattr(price_provider, "last_underlying_market_data_availability", None)
-            market_status = availability.feed if availability is not None else "Disponible"
             result = TechnicalCheckResult(symbol, period, price, context, status, None, market_status,
                                           bars_received, historical_seconds, technical_seconds)
             results.append(result)
@@ -88,7 +88,7 @@ def check_tickers(
             )
         except Exception as exc:
             results.append(TechnicalCheckResult(symbol, period, price, None, "error", _safe_error(exc),
-                                                "No disponible"))
+                                                market_status))
     return tuple(results)
 
 
