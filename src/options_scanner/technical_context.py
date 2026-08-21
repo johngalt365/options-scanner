@@ -96,6 +96,38 @@ class TechnicalConfluence:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfluenceStrikeContext:
+    """Presentation-only relationship between a strike and a support confluence."""
+
+    strike: float
+    confluence: TechnicalConfluence | None
+    position_label: str
+    distance_percent: float | None
+
+
+def classify_strike_against_confluences(
+    strike: float, confluences: tuple[TechnicalConfluence, ...] | list[TechnicalConfluence]
+) -> ConfluenceStrikeContext:
+    """Select the nearest support confluence without affecting detection or ranking."""
+    supports = tuple(item for item in confluences if item.kind == ZoneType.SUPPORT)
+    if not supports:
+        return ConfluenceStrikeContext(strike, None, "Sin confluencia relevante", None)
+    containing = next((item for item in supports if item.lower <= strike <= item.upper), None)
+    relevant = containing or min(
+        supports,
+        key=lambda item: (item.lower - strike if strike < item.lower else strike - item.upper,
+                          item.lower, item.upper),
+    )
+    if strike > relevant.upper:
+        distance = (strike - relevant.upper) / relevant.upper * 100
+        return ConfluenceStrikeContext(strike, relevant, "Sobre confluencia", distance)
+    if strike < relevant.lower:
+        distance = (strike - relevant.lower) / relevant.lower * 100
+        return ConfluenceStrikeContext(strike, relevant, "Bajo confluencia", distance)
+    return ConfluenceStrikeContext(strike, relevant, "Dentro de confluencia", 0.0)
+
+
+@dataclass(frozen=True, slots=True)
 class TechnicalContext:
     symbol: str
     period: HistoricalPeriod
