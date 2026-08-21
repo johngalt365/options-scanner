@@ -14,7 +14,8 @@ from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
 from options_scanner.market_data import FakeMarketDataProvider
 from options_scanner.scanner import PutScanCandidate, build_candidates, rank_candidates, scan_puts
 from options_scanner.historical import DemoHistoricalDataProvider, HistoricalPeriod
-from options_scanner.technical_context import TechnicalContext, build_technical_context
+from options_scanner.technical_context import (TechnicalContext, build_multi_technical_context,
+                                               build_technical_context)
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +236,9 @@ class PutScanService:
             summary.historical_period = request.historical_period.value
             history_started = self._clock()
             try:
-                bars = history_provider.get_historical_bars(request.ticker, request.historical_period)
+                requested_period = (HistoricalPeriod.ONE_YEAR if request.historical_period == HistoricalPeriod.MULTI
+                                    else request.historical_period)
+                bars = history_provider.get_historical_bars(request.ticker, requested_period)
                 summary.historical_bars_received = getattr(history_provider, "last_historical_bars_received", len(bars))
                 summary.historical_bars_valid = len(bars)
                 summary.historical_status = "ok" if bars else "empty"
@@ -247,8 +250,13 @@ class PutScanService:
                 logger.warning("Historical data unavailable (%s)", type(exc).__name__)
             summary.phase_seconds["historical_data"] = max(0.0, self._clock() - history_started)
             technical_started = self._clock()
-            technical = build_technical_context(request.ticker, request.historical_period, bars, price,
-                                                (candidate.strike for candidate in ranked if candidate.complete))
+            strikes = tuple(candidate.strike for candidate in ranked if candidate.complete)
+            if request.historical_period == HistoricalPeriod.MULTI:
+                histories = {period: tuple(bars[-period.sessions:]) for period in (
+                    HistoricalPeriod.THREE_MONTHS, HistoricalPeriod.SIX_MONTHS, HistoricalPeriod.ONE_YEAR)}
+                technical = build_multi_technical_context(request.ticker, histories, price, strikes)
+            else:
+                technical = build_technical_context(request.ticker, request.historical_period, bars, price, strikes)
             summary.technical_supports = len(technical.supports_below_price)
             summary.technical_resistances = len(technical.resistances_above_price)
             summary.technical_supports_visible = min(3, summary.technical_supports)
@@ -270,7 +278,7 @@ class PutScanService:
                     support_last_contact_sessions=(
                         sessions_after_contact[strike_contexts[candidate.strike].support]
                         if strike_contexts[candidate.strike].support else None
-                    ))
+                    )) if candidate.strike in strike_contexts else candidate
                 for candidate in ranked
             )
             summary.phase_seconds["technical_analysis"] = max(0.0, self._clock() - technical_started)

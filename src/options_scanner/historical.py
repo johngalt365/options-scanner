@@ -12,10 +12,12 @@ class HistoricalPeriod(StrEnum):
     THREE_MONTHS = "3m"
     SIX_MONTHS = "6m"
     ONE_YEAR = "1y"
+    MULTI = "multi"
 
     @property
     def sessions(self) -> int:
-        return {self.THREE_MONTHS: 66, self.SIX_MONTHS: 132, self.ONE_YEAR: 264}[self]
+        return {self.THREE_MONTHS: 66, self.SIX_MONTHS: 132, self.ONE_YEAR: 264,
+                self.MULTI: 264}[self]
 
 
 @dataclass(frozen=True, slots=True)
