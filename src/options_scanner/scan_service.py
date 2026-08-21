@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 import time
 from typing import Callable
 
@@ -68,6 +68,10 @@ class ScanResult:
     summary: ScanMetrics
     elapsed_seconds: float
     incomplete_candidates: tuple[PutScanCandidate, ...] = ()
+    underlying_price: float | None = None
+    market_data_status: str | None = None
+    updated_at: datetime | None = None
+    simulated: bool = False
 
 
 class PutScanService:
@@ -104,6 +108,7 @@ class PutScanService:
                 if (underlying.current_price - quote.contract.strike) / underlying.current_price < request.min_safety_margin
             )
             summary.rejected_delta = max(0, len(all_quotes) - summary.complete - summary.rejected_margin)
+            market_status = "Simulado"
         else:
             # Kept here as a lazy import so legacy imports from scan_puts remain compatible.
             from options_scanner.scan_puts import _ibkr_candidates
@@ -120,6 +125,13 @@ class PutScanService:
                 progress=progress, verbose=verbose,
             )
             candidates = _ibkr_candidates(real_provider, args, as_of, summary=summary)
+            market_status = next((name for name, count in (
+                ("RealTime", summary.market_data_realtime), ("Frozen", summary.market_data_frozen),
+                ("Delayed", summary.market_data_delayed), ("Not Subscribed", summary.market_data_not_subscribed),
+            ) if count), None)
         ranked = tuple(rank_candidates(candidates))
         incomplete = tuple(candidate for candidate in candidates if not candidate.complete)
-        return ScanResult(ranked, summary, max(0.0, self._clock() - started), incomplete)
+        resolved_underlying = underlying if request.fake else getattr(real_provider, "last_underlying", None)
+        price = resolved_underlying.current_price if resolved_underlying is not None else None
+        return ScanResult(ranked, summary, max(0.0, self._clock() - started), incomplete,
+                          price, market_status, datetime.now(timezone.utc), request.fake)
