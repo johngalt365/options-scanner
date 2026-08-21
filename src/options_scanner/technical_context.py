@@ -1,6 +1,7 @@
 """Application service composing history, technical zones and strike context."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import combinations, product
 from enum import StrEnum
 
 from options_scanner.historical import HistoricalBar, HistoricalPeriod
@@ -69,6 +70,32 @@ class StrikeContext:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfluenceOrigin:
+    period: HistoricalPeriod
+    zone: PriceZone
+
+
+@dataclass(frozen=True, slots=True)
+class TechnicalConfluence:
+    lower: float
+    upper: float
+    kind: ZoneType
+    origins: tuple[ConfluenceOrigin, ...]
+    distance_percent: float
+
+    @property
+    def periods(self) -> tuple[HistoricalPeriod, ...]:
+        return tuple(origin.period for origin in self.origins)
+
+    def classify_strike(self, strike: float) -> str:
+        if strike > self.upper:
+            return "por encima"
+        if strike < self.lower:
+            return "por debajo"
+        return "dentro"
+
+
+@dataclass(frozen=True, slots=True)
 class TechnicalContext:
     symbol: str
     period: HistoricalPeriod
@@ -82,6 +109,8 @@ class TechnicalContext:
     support_distance_percent: float | None
     resistance_distance_percent: float | None
     strikes: tuple[StrikeContext, ...]
+    horizon_contexts: tuple["TechnicalContext", ...] = field(default=())
+    confluences: tuple[TechnicalConfluence, ...] = field(default=())
 
 
 def classify_strike_against_zones(
@@ -160,3 +189,46 @@ def build_technical_context(symbol, period, bars, current_price, strikes=(), *, 
         distance(support), distance(resistance),
         tuple(classify_strike_against_zones(s, supports, current_price) for s in strikes),
     )
+
+
+def find_confluences(contexts: tuple[TechnicalContext, ...], current_price: float) -> tuple[TechnicalConfluence, ...]:
+    """Return only real intersections between active zones from distinct horizons."""
+    found: dict[tuple, TechnicalConfluence] = {}
+    for kind in (ZoneType.SUPPORT, ZoneType.RESISTANCE):
+        by_period = []
+        for context in contexts:
+            zones = (context.supports_below_price if kind == ZoneType.SUPPORT
+                     else context.resistances_above_price)
+            active = tuple(zone for zone in zones if not zone.broken)
+            if active:
+                by_period.append((context.period, active))
+        for size in range(2, len(by_period) + 1):
+            for selected in combinations(by_period, size):
+                for zones in product(*(item[1] for item in selected)):
+                    lower, upper = max(z.lower for z in zones), min(z.upper for z in zones)
+                    if lower > upper:
+                        continue
+                    origins = tuple(ConfluenceOrigin(selected[i][0], zone) for i, zone in enumerate(zones))
+                    # A genuine larger intersection supersedes its redundant pair intersections.
+                    key = (kind, round(lower, 10), round(upper, 10), tuple(o.period for o in origins))
+                    edge = upper if current_price > upper else lower if current_price < lower else current_price
+                    found[key] = TechnicalConfluence(lower, upper, kind, origins,
+                                                      (current_price - edge) / edge * 100)
+    values = list(found.values())
+    values = [item for item in values if not any(
+        item.kind == other.kind and len(other.origins) > len(item.origins)
+        and set(item.origins).issubset(set(other.origins)) for other in values
+    )]
+    return tuple(sorted(values, key=lambda item: (item.kind.value, item.lower, item.upper)))
+
+
+def build_multi_technical_context(symbol, histories, current_price, strikes=(), *, window=3, atr_period=14):
+    """Analyze each horizon independently, without changing any zone calibration."""
+    periods = (HistoricalPeriod.THREE_MONTHS, HistoricalPeriod.SIX_MONTHS, HistoricalPeriod.ONE_YEAR)
+    contexts = tuple(build_technical_context(symbol, period, tuple(histories.get(period, ())),
+                                             current_price, strikes, window=window, atr_period=atr_period)
+                     for period in periods)
+    confluences = find_confluences(contexts, current_price)
+    bars = tuple(histories.get(HistoricalPeriod.ONE_YEAR, ()))
+    return TechnicalContext(symbol, HistoricalPeriod.MULTI, bars, current_price, (), (), (), None, None,
+                            None, None, (), contexts, confluences)
