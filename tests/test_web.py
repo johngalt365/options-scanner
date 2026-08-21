@@ -4,7 +4,9 @@ from unittest import TestCase
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
-from options_scanner.web import _interpretation, create_app, ibkr_connection_status
+from options_scanner.web import _interpretation, _rows, create_app, ibkr_connection_status
+from options_scanner.scanner import rank_candidates
+from options_scanner.technical_analysis import PriceZone, ZoneType
 from datetime import date
 
 
@@ -140,6 +142,27 @@ class WebTest(TestCase):
         self.assertIn("N/D", page)
         self.assertIn("$100.00", page)
         self.assertIn("Detalles técnicos", page)
+
+    def test_candidate_context_is_compact_accessible_and_does_not_change_ranking(self):
+        zone=PriceZone(79,81,80,ZoneType.SUPPORT,4,date(2026,8,1),75,"fuerte")
+        base=dict(ticker="NVDA",expiration=date(2026,9,24),dte=35,strike=80,
+                  underlying_price=100,safety_margin=.2,bid=1,ask=1.2,delta=-.2,
+                  gamma=-.01,theta=-.04,vega=.08,implied_volatility=.3,
+                  open_interest=100,market_data_availability="RealTime")
+        contextual=PutScanCandidate(**base,nearest_support_below=zone,
+            support_position="INSIDE_SUPPORT",distance_to_support_pct=0,
+            support_strength="fuerte",support_zone_label="S1",
+            support_position_label="Dentro de S1",support_last_contact_sessions=12)
+        other=PutScanCandidate(**{**base,"ticker":"MSFT","strike":70,"bid":.5,"ask":.7})
+        before=[c.ticker for c in rank_candidates((contextual,other))]
+        html=_rows(ScanResult((contextual,other),ScanMetrics(),.1))
+        self.assertEqual(before,[c.ticker for c in rank_candidates((contextual,other))])
+        self.assertIn("Dentro S1 · Fuerte",html)
+        self.assertIn('aria-label="Detalle técnico de NVDA, strike $80.00"',html)
+        for value in ("$79.00–$81.00","4","12 sesiones","+0.00 %"):
+            self.assertIn(value,html)
+        self.assertIn("Sin contexto técnico",html)
+        self.assertEqual(html.count("Dentro S1 · Fuerte"),1)
 
     def test_frozen_market_data_is_explained_without_error_styling(self):
         candidate = PutScanCandidate(

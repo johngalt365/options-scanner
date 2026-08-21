@@ -184,13 +184,23 @@ class PutScanService:
             summary.technical_supports_visible = min(3, summary.technical_supports)
             summary.technical_resistances_visible = min(2, summary.technical_resistances)
             strike_contexts = {item.strike: item for item in technical.strikes}
+            sessions_after_contact = {
+                zone: sum(bar.session > zone.last_contact for bar in technical.bars)
+                for zone in technical.supports_below_price
+            }
             ranked = tuple(
                 replace(candidate,
                     nearest_support_below=strike_contexts[candidate.strike].support,
                     support_position=strike_contexts[candidate.strike].position,
                     distance_to_support_pct=strike_contexts[candidate.strike].distance_percent,
                     support_strength=(strike_contexts[candidate.strike].support.strength
-                                      if strike_contexts[candidate.strike].support else None))
+                                      if strike_contexts[candidate.strike].support else None),
+                    support_zone_label=strike_contexts[candidate.strike].zone_label,
+                    support_position_label=strike_contexts[candidate.strike].position_label,
+                    support_last_contact_sessions=(
+                        sessions_after_contact[strike_contexts[candidate.strike].support]
+                        if strike_contexts[candidate.strike].support else None
+                    ))
                 for candidate in ranked
             )
             summary.phase_seconds["technical_analysis"] = max(0.0, self._clock() - technical_started)

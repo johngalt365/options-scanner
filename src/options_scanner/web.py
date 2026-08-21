@@ -39,11 +39,37 @@ def _percent(value: float | None) -> str:
     return '<span class="na">N/D</span>' if value is None else f"{value * 100:.2f} %"
 
 
+def _candidate_technical_context(candidate) -> str:
+    """Render context stored on the candidate, isolated from other tickers."""
+    zone = candidate.nearest_support_below
+    if zone is None or not candidate.support_position_label:
+        return '<span class="na technical-compact">Sin contexto técnico</span>'
+    strength = candidate.support_strength or zone.strength
+    compact_position = (candidate.support_position_label.replace("Dentro de ", "Dentro ")
+                        .replace("Por debajo de ", "Debajo ")
+                        .replace("Por encima de ", "Encima ").replace(" y ", "/"))
+    compact = f"{compact_position} · {strength.capitalize()}" if "Dentro" in compact_position else compact_position
+    distance = "N/D" if candidate.distance_to_support_pct is None else f"{candidate.distance_to_support_pct:+.2f} %"
+    sessions = "N/D" if candidate.support_last_contact_sessions is None else str(candidate.support_last_contact_sessions)
+    label = candidate.support_zone_label or "soporte"
+    accessible = f"Detalle técnico de {candidate.ticker}, strike ${candidate.strike:.2f}"
+    return (
+        f'<details class="candidate-technical"><summary aria-label="{escape(accessible)}">'
+        f'<span class="technical-compact">{escape(compact)}</span></summary><dl>'
+        f'<div><dt>Zona</dt><dd>{escape(label)}</dd></div>'
+        f'<div><dt>Rango</dt><dd>${zone.lower:.2f}–${zone.upper:.2f}</dd></div>'
+        f'<div><dt>Fuerza</dt><dd>{escape(strength)}</dd></div>'
+        f'<div><dt>Contactos</dt><dd>{zone.contacts}</dd></div>'
+        f'<div><dt>Último contacto</dt><dd>{sessions} sesiones</dd></div>'
+        f'<div><dt>Distancia</dt><dd>{escape(distance)}</dd></div></dl></details>'
+    )
+
+
 def _rows(result: ScanResult | None) -> str:
     if result is None:
         return ""
     if not result.candidates:
-        return '<tr><td colspan="18" class="empty">No hay candidatos completos para estos filtros.</td></tr>'
+        return '<tr><td colspan="19" class="empty">No hay candidatos completos para estos filtros.</td></tr>'
     rendered = []
     for c in result.candidates:
         availability = escape(str(c.market_data_availability))
@@ -56,6 +82,7 @@ def _rows(result: ScanResult | None) -> str:
             _number(c.theta, 4), _number(c.vega, 4), _percent(c.implied_volatility),
             _number(c.open_interest), availability, _percent(c.premium_yield),
             _percent(c.annualized_premium_yield),
+            _candidate_technical_context(c),
         )
         rendered.append("<tr>" + "".join(f"<td>{value}</td>" for value in cells) + "</tr>")
     return "".join(rendered)
@@ -107,6 +134,9 @@ def _interpretation(result: ScanResult | None) -> str:
             ("success", f"Se encontraron {candidate_count} candidatos que cumplen todos los filtros actuales."),
             ("neutral", "Ordenados por rentabilidad anualizada de la prima."),
         ))
+        inside = [c for c in result.candidates if (c.support_position_label or "").startswith("Dentro de ")]
+        if inside:
+            messages.append(("neutral", f"{len(inside)} candidatos tienen strikes dentro de zonas de soporte activas."))
     else:
         messages.append(("neutral", "No se encontraron candidatos que cumplan todos los filtros."))
 
@@ -274,12 +304,13 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
         v.update(values)
     checked = " checked" if v["mode"] == "fake" else ""
     alert = f'<div class="error" role="alert">{escape(error)}</div>' if error else ""
-    table = "" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>'''
+    table = "" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>'''
     html = f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Options Scanner</title><style>
 body{{font:15px system-ui;margin:0;background:#f4f6fa;color:#182033}}main{{max-width:1500px;margin:auto;padding:2rem}}h1{{margin:0}}.note{{color:#556}}.top{{display:flex;justify-content:space-between;gap:1rem;align-items:start}}.connection{{background:white;padding:.7rem;border-radius:8px;min-width:220px}}.dot{{display:inline-block;width:.75rem;height:.75rem;border-radius:50%;background:#818895;margin-right:.4rem}}.connected .dot{{background:#198754}}.login .dot{{background:#e58a00}}.disconnected .dot{{background:#c52d36}}.demo .dot{{background:#818895}}.connection button{{font-size:.8rem;padding:.35rem .6rem;margin-top:.4rem}}.connection small{{display:block;color:#596273;margin-top:.25rem}}
 form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padding:1.25rem;border-radius:10px;box-shadow:0 2px 8px #0001}}label{{display:grid;gap:.35rem;font-weight:600}}input{{padding:.55rem;border:1px solid #aab3c5;border-radius:5px;width:9rem}}button{{background:#2358d5;color:white;border:0;border-radius:5px;padding:.7rem 1.4rem;font-weight:700;cursor:pointer}}button:disabled{{cursor:not-allowed;opacity:.65}}.mode{{display:flex;align-items:center;gap:.4rem}}.mode input{{width:auto}}
 .interpretation{{background:white;padding:1rem 1.2rem;border-radius:8px;border-left:4px solid #60708c;margin-top:1rem}}.interpretation h2{{margin-top:0}}.interpretation-message{{margin:.45rem 0;padding:.45rem .65rem;border-radius:4px}}.interpretation-message.success{{background:#e9f7ef;border-left:3px solid #198754}}.interpretation-message.neutral{{background:#eef3fb;border-left:3px solid #60708c}}.interpretation-message.warning{{background:#fff7db;border-left:3px solid #d18a00}}.interpretation-message.error{{background:#fff0f0;border-left:3px solid #c22}}.interpretation ul{{margin-bottom:0}}.interpretation dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem}}.interpretation dl div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}
 .technical{{background:white;padding:1rem;border-radius:8px}}.technical-title h2{{margin:0 0 .8rem}}.technical-metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:0}}.technical-metrics>div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}.technical details{{border-top:1px solid #dde2ea;padding-top:.7rem}}.technical details>summary{{color:#2358d5;width:max-content}}.chart-panel{{margin-top:.8rem}}.period-selector{{display:flex;gap:.35rem;margin-bottom:.6rem}}.period-button{{padding:.4rem .7rem;background:#e7ebf3;color:#263451}}.period-button.active{{background:#2358d5;color:white}}.technical svg{{width:100%;height:360px;background:#fafbfd;border:1px solid #dce2ec}}.price{{fill:none;stroke:#254fbd;stroke-width:2}}.zone.support{{fill:#2ca66f}}.zone.resistance{{fill:#db5a55}}.zone.weak{{opacity:.10}}.zone.medium{{opacity:.18}}.zone.strong{{opacity:.27}}.zone-label{{font-weight:800;font-size:14px}}.support-label{{fill:#176b48}}.resistance-label{{fill:#9b302c}}.grid{{stroke:#dfe4ec;stroke-width:1}}.axis-tick{{stroke:#778196}}.axis-label{{fill:#596273;font-size:11px}}.current-label{{fill:#182033;font-size:12px;font-weight:700}}.current{{stroke:#182033;stroke-width:1.5;stroke-dasharray:7 4}}.strike{{stroke:#8b55bb;stroke-width:1;stroke-dasharray:3 4}}.zone-strength{{display:block;font-size:.8rem;font-weight:500;text-transform:capitalize}}.zone-table-wrap{{overflow:auto;margin-top:.8rem}}.zone-table{{font-size:.9rem}}.zone-table th{{background:#eef1f6;color:#263451}}.technical-context{{background:#f6f8fb;padding:.8rem 1rem;margin-top:.7rem}}.history-unavailable{{background:#fff7db;border-left:4px solid #d18a00;padding:.75rem;margin-top:.8rem}}.history-unavailable p{{margin:.3rem 0 0}}.disclaimer{{color:#596273;font-size:.9rem}}
+.candidate-technical{{margin:0;min-width:10rem;text-align:left}}.candidate-technical summary{{white-space:nowrap}}.candidate-technical dl{{display:grid;grid-template-columns:repeat(2,minmax(7rem,1fr));gap:.35rem;margin:.6rem 0 0}}.candidate-technical dl div{{white-space:normal;background:#f4f6fa;padding:.35rem}}.candidate-technical dd{{font-size:.9rem}}.technical-compact{{font-weight:650}}
 .scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
 </style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading.</p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div><form method="post">
 <label>Ticker<input name="ticker" value="{escape(v['ticker'])}" required></label><label>Min DTE<input type="number" name="min_dte" min="0" value="{escape(v['min_dte'])}" required></label><label>Max DTE<input type="number" name="max_dte" min="0" value="{escape(v['max_dte'])}" required></label>
