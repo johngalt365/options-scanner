@@ -157,12 +157,13 @@ class WebTest(TestCase):
         before=[c.ticker for c in rank_candidates((contextual,other))]
         html=_rows(ScanResult((contextual,other),ScanMetrics(),.1))
         self.assertEqual(before,[c.ticker for c in rank_candidates((contextual,other))])
-        self.assertIn("Dentro S1 · Fuerte",html)
+        self.assertIn("Dentro S1 · en S1 fuerte",html)
+        self.assertIn("Distancia al límite de S1",html)
         self.assertIn('aria-label="Detalle técnico de NVDA, strike $80.00"',html)
         for value in ("$79.00–$81.00","4","12 sesiones","+0.00 %"):
             self.assertIn(value,html)
         self.assertIn("Sin contexto técnico",html)
-        self.assertEqual(html.count("Dentro S1 · Fuerte"),1)
+        self.assertEqual(html.count("Dentro S1 · en S1 fuerte"),1)
 
     def test_frozen_market_data_is_explained_without_error_styling(self):
         candidate = PutScanCandidate(
@@ -203,9 +204,18 @@ class WebTest(TestCase):
         self.assertIn("7 contratos no pudieron evaluarse completamente por falta de bid, ask o delta.", block)
 
     def test_interpretation_explains_partial_timeout_and_pending_count(self):
-        block = self.interpretation(timed_out=True, unresolved_contracts_timeout=11)
+        block = self.interpretation(timed_out=True, unresolved_contracts_timeout=92,
+                                    target_contracts=142, considered=50,
+                                    candidates=(PutScanCandidate(
+                                        "NVDA", date(2026, 9, 24), 35, 80, 100, .20, 1, 1.2, -.2,
+                                        -.01, -.04, .08, .30, 100, "RealTime"),))
         self.assertIn("El scan terminó con resultados parciales", block)
-        self.assertIn("11 contratos quedaron pendientes.", block)
+        self.assertIn("1 candidato encontrado entre 50 contratos evaluados. 92 contratos objetivo no llegaron a evaluarse.", block)
+        self.assertNotIn("Se encontraron 1 candidatos", block)
+        for detail in ("Contratos objetivo: 142.", "Contratos resueltos: 0.",
+                       "Contratos que llegaron a market data/filtros: 50.",
+                       "Candidatos completos: 1.", "No resueltos por timeout: 92."):
+            self.assertIn(detail, block)
         self.assertIn('class="interpretation-message warning"', block)
 
     def test_interpretation_warns_about_frozen_market_data(self):

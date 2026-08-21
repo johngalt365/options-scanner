@@ -26,9 +26,16 @@ class StubTransport:
         if self.snapshots[conids] == 1: return [{"conid": int(conids)}]
         if conids == "1": return [{"conid": 1, "31": "100.50"}]
         conid = int(params["conids"])
-        return [{"conid": conid, "84": "1.75", "86": "1.90", "7308": "-0.25", "7309": "0.016", "7310": "-0.05", "7311": "0.09", "7633": "0.35", "7638": "1750", "6509": "ZBd"}]
+        return [{"conid": conid, "84": "1.75", "86": "1.90", "7308": "-0.25", "7309": "0.016", "7310": "-0.05", "7311": "0.09", "7633": "35", "7638": "1750", "6509": "ZBd"}]
 
 class IbkrMappingTest(TestCase):
+    def test_ibkr_percentage_points_are_normalized_to_canonical_fraction(self):
+        normalize = IbkrMarketDataProvider._canonical_implied_volatility
+        for wire_value, canonical in ((0.0, 0.0), (12.5, .125), (48.2, .482), (100.0, 1.0)):
+            with self.subTest(wire_value=wire_value):
+                self.assertAlmostEqual(normalize(wire_value), canonical)
+        self.assertIsNone(normalize(None))
+
     def test_maps_transport_payload_to_internal_immutable_models(self):
         transport = StubTransport(); provider = IbkrMarketDataProvider(transport)
         underlying = provider.get_underlying("nvda"); quote = provider.get_option_market_data("nvda")[0]

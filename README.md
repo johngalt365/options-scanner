@@ -377,7 +377,12 @@ R1  $109.30–$110.70  +4.76 %  Media   2 contactos  último contacto 4 sesiones
 Strike $100: BELOW_SUPPORT respecto de S1 y por encima de S2
 ```
 
-Cada candidato puede incluir de forma opcional su soporte relevante, posición (`ABOVE_SUPPORT`, `INSIDE_SUPPORT` o `BELOW_SUPPORT`), distancia porcentual y fuerza. Estos campos son exclusivamente descriptivos: no filtran contratos, no alteran yields y no intervienen en el orden del ranking.
+Cada candidato puede incluir de forma opcional su soporte relevante, posición (`ABOVE_SUPPORT`, `INSIDE_SUPPORT` o `BELOW_SUPPORT`), distancia porcentual al límite más cercano de esa zona y fuerza. El mapa visible distingue por encima de S1, dentro de cada zona, cada intervalo S1/S2… y por debajo del último soporte activo. Estos campos son exclusivamente descriptivos: no filtran contratos, no alteran yields y no intervienen en el orden del ranking.
+
+La unidad interna canónica de IV es una **fracción decimal** (`0.482` representa
+`48.2 %`). El adaptador de Client Portal convierte una sola vez el campo 7633,
+que IBKR entrega en puntos porcentuales, al construir la cotización interna; la
+UI aplica el formato porcentual solamente para presentarla.
 
 ## Validación técnica multi-ticker
 

@@ -94,7 +94,11 @@ class OptionContract:
 
 @dataclass(frozen=True, slots=True)
 class MarketData:
-    """Cotización completa de un contrato en un instante lógico."""
+    """Cotización completa de un contrato en un instante lógico.
+
+    ``implied_volatility`` uses a decimal fraction internally (``0.482`` is
+    48.2%). Providers must normalize their wire format at the integration edge.
+    """
 
     contract: OptionContract
     bid: float

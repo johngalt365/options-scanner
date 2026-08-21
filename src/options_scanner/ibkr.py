@@ -212,6 +212,16 @@ class IbkrMarketDataProvider:
     # response often contains only the contract identifier.
     SNAPSHOT_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 3.0)
 
+    @staticmethod
+    def _canonical_implied_volatility(value: float | None) -> float | None:
+        """Convert IBKR field 7633 percentage points to a decimal fraction.
+
+        The scanner's canonical IV unit is a decimal fraction: 0.482 means
+        48.2%.  Client Portal field 7633 is documented and labelled as a
+        percentage, so conversion happens exactly once at the provider edge.
+        """
+        return None if value is None else value / 100
+
     def __init__(
         self,
         transport: IbkrTransport,
@@ -595,7 +605,8 @@ class IbkrMarketDataProvider:
                 conid, strike, expiration, _number(row, "84", "bid"), _number(row, "86", "ask"),
                 _number(row, "7308", "delta"), _number(row, "7309", "gamma"),
                 _number(row, "7310", "theta"), _number(row, "7311", "vega"),
-                _number(row, "7633", "iv"), _integer(row, "7638", "open_interest"),
+                self._canonical_implied_volatility(_number(row, "7633", "iv")),
+                _integer(row, "7638", "open_interest"),
                 _market_data_availability(row.get(self.MARKET_DATA_AVAILABILITY_FIELD)),
                 statuses,
             ))

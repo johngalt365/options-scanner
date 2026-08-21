@@ -46,7 +46,7 @@ class FakeTransport:
             if params["conids"] == "4815747":
                 return [{"conid": 4815747, "31": "101.25"}]
             return [
-                {"conid": conid, "84": "1.1", "86": "1.2", "7308": "-0.25", "7309": "0.1", "7310": "-0.04", "7311": "0.08", "7633": "0.32", "7638": "1200", "6509": "RpB"}
+                {"conid": conid, "84": "1.1", "86": "1.2", "7308": "-0.25", "7309": "0.1", "7310": "-0.04", "7311": "0.08", "7633": "32", "7638": "1200", "6509": "RpB"}
                 for conid in params["conids"].split(",")
             ]
         raise AssertionError(path)
@@ -168,7 +168,7 @@ class DiagnosticTest(TestCase):
                     [{"conidEx": "101@SMART"}, {"conidEx": "102@SMART"}],
                     [{"conid": 101, "84": "C1.10", "86": "1.20"}, {"conid": 102, "84": "2.10"}],
                     [{"conid": 101, "7308": "-0.25", "7309": "0.1", "7310": "-0.04", "7311": "0.08", "7633": "32%", "7638": "1.2K", "6509": "RpB"},
-                     {"conid": 102, "86": "2.20", "7308": "-0.30", "7309": "0.11", "7310": "-0.05", "7311": "0.09", "7633": "0.35", "7638": 900, "6509": "D"}],
+                     {"conid": 102, "86": "2.20", "7308": "-0.30", "7309": "0.11", "7310": "-0.05", "7311": "0.09", "7633": "35", "7638": 900, "6509": "D"}],
                 ]
                 return responses[len(self.calls) - 1]
 
@@ -179,7 +179,8 @@ class DiagnosticTest(TestCase):
 
         self.assertEqual(len(transport.calls), 3)  # pre-flight + dos entregas diferidas
         self.assertTrue(all(call[1]["fields"] == "84,86,7308,7309,7310,7311,7633,7638,6509" for call in transport.calls))
-        self.assertEqual((quotes[0].bid, quotes[0].implied_volatility, quotes[0].open_interest), (1.1, 32.0, 1200))
+        self.assertEqual((quotes[0].bid, quotes[0].implied_volatility, quotes[0].open_interest), (1.1, .32, 1200))
+        self.assertEqual(quotes[1].implied_volatility, .35)
         self.assertEqual(quotes[1].ask, 2.2)
         self.assertTrue(all(status is MarketDataFieldStatus.AVAILABLE for quote in quotes for status in quote.field_statuses.values()))
         self.assertEqual(quotes[0].market_data_availability.display, "RpB (RealTime, book disponible)")
