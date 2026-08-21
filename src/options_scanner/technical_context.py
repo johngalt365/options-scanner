@@ -24,6 +24,8 @@ class StrikeContext:
     support: PriceZone | None
     distance_percent: float | None
     position: StrikePosition | None
+    zone_label: str | None = None
+    position_label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +59,7 @@ def classify_strike_against_zones(
     active = tuple(z for z in supports if z.kind == ZoneType.SUPPORT and not z.broken)
     if not active:
         return StrikeContext(strike, None, None, None)
+    active = tuple(sorted(active, key=lambda zone: zone.center, reverse=True))
     containing = next((z for z in active if z.lower <= strike <= z.upper), None)
     support = containing or min(
         active,
@@ -67,7 +70,23 @@ def classify_strike_against_zones(
         StrikePosition.BELOW_SUPPORT if strike < support.lower else
         StrikePosition.INSIDE_SUPPORT
     )
-    return StrikeContext(strike, support, (strike - support.center) / support.center * 100, position)
+    support_index = active.index(support)
+    zone_label = f"S{support_index + 1}"
+    containing_index = next((i for i, zone in enumerate(active) if zone.lower <= strike <= zone.upper), None)
+    if containing_index is not None:
+        position_label = f"Dentro de S{containing_index + 1}"
+    elif strike > active[0].upper:
+        position_label = "Por encima de S1"
+    elif strike < active[-1].lower:
+        position_label = f"Por debajo de S{len(active)}"
+    else:
+        position_label = next(
+            (f"Entre S{i + 1} y S{i + 2}" for i, (upper, lower) in
+             enumerate(zip(active, active[1:])) if lower.upper < strike < upper.lower),
+            f"Por {'encima' if position == StrikePosition.ABOVE_SUPPORT else 'debajo'} de {zone_label}",
+        )
+    return StrikeContext(strike, support, (strike - support.center) / support.center * 100,
+                         position, zone_label, position_label)
 
 
 def strike_context(strike: float, support: PriceZone | None) -> StrikeContext:

@@ -34,6 +34,9 @@ class PutScanCandidate:
     support_position: str | None = None
     distance_to_support_pct: float | None = None
     support_strength: str | None = None
+    support_zone_label: str | None = None
+    support_position_label: str | None = None
+    support_last_contact_sessions: int | None = None
 
     @property
     def mid(self) -> float | None:

@@ -109,6 +109,15 @@ class TechnicalMapTest(TestCase):
         empty=classify_strike_against_zones(200,(),220)
         self.assertIsNone(empty.position); self.assertIsNone(empty.support)
 
+    def test_deterministic_support_zone_position_labels(self):
+        from options_scanner.technical_context import classify_strike_against_zones
+        supports=(self.zone(215),self.zone(200),self.zone(185))
+        expected={215:"Dentro de S1",208:"Entre S1 y S2",200:"Dentro de S2",170:"Por debajo de S3"}
+        for strike,label in expected.items():
+            with self.subTest(strike=strike):
+                self.assertEqual(classify_strike_against_zones(strike,supports,220).position_label,label)
+        self.assertIsNone(classify_strike_against_zones(200,(),220).position_label)
+
     def test_active_zone_map_order_and_broken_zone_exclusion(self):
         from unittest.mock import patch
         detected=(self.zone(180),self.zone(210),self.zone(195),self.zone(230,ZoneType.RESISTANCE),
