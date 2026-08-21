@@ -4,7 +4,7 @@ from unittest import TestCase
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
-from options_scanner.web import (_interpretation, _rows, create_app, ibkr_connection_status, parse_tickers,
+from options_scanner.web import (_interpretation, _multi_screener, _rows, create_app, ibkr_connection_status, parse_tickers,
                                  render_page, render_technical_screener, resolve_universe)
 from options_scanner.historical import HistoricalBar
 from datetime import timedelta
@@ -57,6 +57,38 @@ class StatusTransport:
 
 
 class WebTest(TestCase):
+    def test_explainable_strike_columns_quick_filters_and_sorting_controls(self):
+        zone = PriceZone(70.73, 91.04, 80, ZoneType.SUPPORT, 3, date(2026, 8, 1), 75, "fuerte")
+        base = dict(expiration=date(2026, 9, 24), dte=35, underlying_price=100,
+                    safety_margin=.20, bid=1, ask=1.2, delta=-.2, gamma=None, theta=None,
+                    vega=None, implied_volatility=.3, open_interest=100,
+                    market_data_availability="RealTime", nearest_support_below=zone,
+                    support_strength="fuerte", support_zone_label="S1")
+        cases = (
+            ("ABOVE", 95, "ABOVE_SUPPORT", 4.35, "Por encima de S1", "strike-above", "Sobre S1"),
+            ("INSIDE", 80, "INSIDE_SUPPORT", 0, "Dentro de S1", "strike-inside", "Dentro S1"),
+            ("BELOW", 65, "BELOW_SUPPORT", -8.10, "Por debajo de S1", "strike-below", "Bajo S1"),
+        )
+        items = []
+        for ticker, strike, position, distance, label, _, _ in cases:
+            candidate = PutScanCandidate(ticker=ticker, strike=strike, support_position=position,
+                                         distance_to_support_pct=distance,
+                                         support_position_label=label, **base)
+            items.append((ticker, ScanResult((candidate,), ScanMetrics(), .1,
+                                             underlying_price=100), None))
+        page = _multi_screener(tuple(items))
+
+        for _, _, _, _, _, css_class, label in cases:
+            self.assertIn(css_class, page)
+            self.assertIn(label, page)
+        for label in ("Strike sobre soporte", "Strike dentro soporte", "Strike bajo soporte"):
+            self.assertIn(label, page)
+        for heading in ("Safety margin", "Delta", "Premium yield", "Annualized yield",
+                        "Distancia strike–soporte"):
+            self.assertRegex(page, rf'class="sort-button"[^>]*>{heading}')
+        self.assertIn("Strike $95.00 situado por encima de S1 ($70.73–$91.04). S1 fuerte, 3 contactos.", page)
+        self.assertNotIn("recomend", page.lower())
+
     def test_multi_screener_controls_badges_summary_and_fourteen_rows(self):
         items = tuple(
             (f"T{i:02d}", ScanResult((), ScanMetrics(), .1, underlying_price=100 + i,
