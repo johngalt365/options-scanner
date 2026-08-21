@@ -57,6 +57,33 @@ class WebTest(TestCase):
         self.assertIn("Datos simulados — no proceden de Interactive Brokers", page)
         self.assertIn("Modo demostración", page)
 
+    def test_scan_loading_state_disables_button_and_tracks_elapsed_time(self):
+        _, page = request(create_app(StubService()))
+        self.assertIn('id="scan-status"', page)
+        self.assertIn('class="spinner"', page)
+        self.assertIn("Escaneando '+form.elements.ticker.value", page)
+        self.assertIn("Tiempo transcurrido:", page)
+        self.assertIn("setInterval", page)
+        self.assertIn("scanButton.disabled=true", page)
+        self.assertIn("Scan en curso...", page)
+        self.assertIn("if(scanning)return", page)
+
+    def test_scan_uses_fetch_and_restores_ui_on_completion(self):
+        _, page = request(create_app(StubService()))
+        self.assertIn("await fetch('/',", page)
+        self.assertIn("new URLSearchParams(new FormData(form))", page)
+        self.assertIn("Scan completado en ", page)
+        self.assertIn("clearInterval(interval)", page)
+        self.assertIn("scanButton.disabled=false", page)
+        self.assertIn("finally{finishScan()}", page)
+
+    def test_scan_has_safe_client_error_and_live_and_demo_messages(self):
+        _, page = request(create_app(StubService()))
+        self.assertIn("Consultando Interactive Brokers...", page)
+        self.assertIn("Consultando datos de demostración...", page)
+        self.assertIn("No se pudo completar el scan. Inténtalo de nuevo.", page)
+        self.assertNotIn("error.stack", page)
+
     def test_four_connection_states_are_safe_and_accessible(self):
         cases = (
             ({"authenticated": True, "connected": True}, None, "connected", "IBKR conectado"),
@@ -105,6 +132,21 @@ class WebTest(TestCase):
         self.assertIn("N/D", page)
         self.assertIn("$100.00", page)
         self.assertIn("Detalles técnicos", page)
+
+    def test_frozen_market_data_is_explained_without_error_styling(self):
+        candidate = PutScanCandidate(
+            "NVDA", date(2026, 9, 24), 35, 80, 100, .20, 1, 1.2, -.2,
+            -.01, -.04, .08, .30, 100, "ZBd (Frozen)",
+        )
+        result = ScanResult(
+            (candidate,), ScanMetrics(considered=1, complete=1, market_data_frozen=1),
+            .02, underlying_price=100, market_data_status="Frozen",
+        )
+        _, page = request(create_app(StubService(result=result)), "POST", FORM)
+        self.assertIn('<span class="market-state frozen">Frozen</span>', page)
+        self.assertIn("ZBd (Frozen)", page)
+        self.assertGreaterEqual(page.count("Cotización congelada / última disponible"), 2)
+        self.assertNotIn('<div class="error" role="alert">Frozen', page)
 
     def test_invalid_parameters_are_safe(self):
         status, page = request(create_app(StubService()), "POST", FORM.replace("min_dte=30", "min_dte=x"))
