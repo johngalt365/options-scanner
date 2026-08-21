@@ -29,6 +29,14 @@ def request(app, method="GET", body=""):
     return captured["status"], output
 
 
+def request_path(app, path, query=""):
+    captured = {}
+    environ = {"PATH_INFO": path, "QUERY_STRING": query, "REQUEST_METHOD": "GET",
+               "wsgi.input": BytesIO()}
+    output = b"".join(app(environ, lambda status, headers: captured.update(status=status))).decode()
+    return captured["status"], output
+
+
 FORM = "ticker=NVDA&min_dte=30&max_dte=45&min_safety_margin=20&min_abs_delta=0.15&max_abs_delta=0.30"
 
 
@@ -57,6 +65,66 @@ class StatusTransport:
 
 
 class WebTest(TestCase):
+    def test_multi_detail_uses_each_stored_context_and_lazy_chart_without_rescan(self):
+        bar = HistoricalBar(date(2026, 1, 2), 99, 102, 98, 101)
+
+        class ContextService(StubService):
+            def run(self, scan_request, **kwargs):
+                self.requests.append(scan_request)
+                offset = 0 if scan_request.ticker == "NVDA" else 50
+                support = PriceZone(90 + offset, 92 + offset, 91 + offset,
+                                    ZoneType.SUPPORT, 3, date(2026, 1, 1), 2, "fuerte")
+                resistance = PriceZone(108 + offset, 110 + offset, 109 + offset,
+                                       ZoneType.RESISTANCE, 2, date(2026, 1, 1), 3, "media")
+                price = 100 + offset
+                context = TechnicalContext(scan_request.ticker, HistoricalPeriod.SIX_MONTHS,
+                                           (bar,), price, (support, resistance), (support,),
+                                           (resistance,), support, resistance, None, None, ())
+                return ScanResult((), ScanMetrics(historical_status="ok"), .01,
+                                  underlying_price=price, market_data_status="RealTime",
+                                  technical_context=context)
+
+        service = ContextService()
+        app = create_app(service, ticker_workers=1)
+        status, page = request(app, "POST", FORM.replace("NVDA", "NVDA%2CSPY"))
+
+        self.assertEqual(status, "200 OK")
+        self.assertIn('data-ticker="NVDA"', page)
+        self.assertIn('data-ticker="SPY"', page)
+        self.assertIn("$90.00–$92.00", page)
+        self.assertIn("$140.00–$142.00", page)
+        for level in ("S1", "S2", "S3", "R1", "R2"):
+            self.assertIn(f"<dt>{level}</dt>", page)
+        self.assertEqual(page.count('<details class="ticker-detail" open'), 0)
+        self.assertEqual(page.count('<details class="lazy-chart"'), 2)
+        self.assertNotIn('<svg role="img"', page)
+        self.assertIn(".ticker-detail[open]", page)
+
+        calls_after_scan = len(service.requests)
+        chart_status, nvda_chart = request_path(app, "/scan-chart", "ticker=NVDA")
+        self.assertEqual(chart_status, "200 OK")
+        self.assertIn('<svg role="img"', nvda_chart)
+        self.assertIn('data-ticker="NVDA"', nvda_chart)
+        self.assertNotIn('data-ticker="SPY"', nvda_chart)
+        self.assertEqual(len(service.requests), calls_after_scan)
+
+    def test_multi_detail_reports_missing_history_and_single_ticker_keeps_chart(self):
+        empty = ScanResult((), ScanMetrics(historical_status="empty", historical_period="6m"),
+                           .01, underlying_price=100, market_data_status="Delayed",
+                           technical_context=None)
+        multi = render_page(multi_results=(("EMPTY", empty, None), ("OTHER", empty, None))).decode()
+        self.assertEqual(multi.count("Histórico no disponible"), 2)
+
+        bar = HistoricalBar(date(2026, 1, 2), 99, 102, 98, 101)
+        context = TechnicalContext("ONE", HistoricalPeriod.SIX_MONTHS, (bar,), 101,
+                                   (), (), (), None, None, None, None, ())
+        single = render_page(result=ScanResult((), ScanMetrics(), .01,
+                                               underlying_price=101,
+                                               technical_context=context),
+                             values={"ticker": "ONE"}).decode()
+        self.assertIn('<svg role="img"', single)
+        self.assertIn("Ver gráfico", single)
+
     def test_explainable_strike_columns_quick_filters_and_sorting_controls(self):
         zone = PriceZone(70.73, 91.04, 80, ZoneType.SUPPORT, 3, date(2026, 8, 1), 75, "fuerte")
         base = dict(expiration=date(2026, 9, 24), dte=35, underlying_price=100,
