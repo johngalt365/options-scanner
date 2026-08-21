@@ -5,7 +5,7 @@ from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
 from options_scanner.web import (_interpretation, _rows, create_app, ibkr_connection_status, parse_tickers,
-                                 render_technical_screener, resolve_universe)
+                                 render_page, render_technical_screener, resolve_universe)
 from options_scanner.historical import HistoricalBar
 from datetime import timedelta
 from options_scanner.scanner import rank_candidates
@@ -57,6 +57,47 @@ class StatusTransport:
 
 
 class WebTest(TestCase):
+    def test_multi_screener_controls_badges_summary_and_fourteen_rows(self):
+        items = tuple(
+            (f"T{i:02d}", ScanResult((), ScanMetrics(), .1, underlying_price=100 + i,
+                                      market_data_status=("Frozen" if i == 0 else "Delayed")), None)
+            for i in range(14)
+        )
+        page = render_page(multi_results=items).decode()
+        self.assertEqual(page.count('class="ticker-detail"'), 14)
+        self.assertEqual(page.count('<details class="ticker-detail" open'), 0)
+        self.assertIn("14 tickers · 0 con candidatos · 14 sin candidatos · 1.4 s · 0 error", page)
+        for name in ("Todos", "Con candidatos", "Sin candidatos", "Soporte fuerte", "Cerca de S1"):
+            self.assertIn(name, page)
+        for heading in ("Ticker", "Precio", "Distancia S1", "Candidatos", "Delta",
+                        "Premium yield", "Annualized yield"):
+            self.assertRegex(page, rf'class="sort-button"[^>]*>{heading}')
+        self.assertIn('class="status-badge frozen"', page)
+        self.assertIn('class="status-badge delayed"', page)
+        self.assertIn('class="screener-table"', page)
+        self.assertIn(".scroll{overflow:auto}", page)
+
+    def test_detail_actions_are_delegated_and_charts_lazy(self):
+        result = ScanResult((), ScanMetrics(), .1, underlying_price=100,
+                            market_data_status="RealTime")
+        page = render_page(multi_results=(("NVDA", result, None), ("SPY", result, None))).decode()
+        self.assertEqual(page.count("<summary>Ver detalle</summary>"), 2)
+        self.assertIn(".detail-close", page)
+        self.assertIn(".lazy-chart", page)
+        self.assertNotIn('<svg role="img"', page)
+        self.assertIn("addEventListener('toggle'", page)
+
+    def test_compact_header_keeps_watchlist_selector_and_financial_filters(self):
+        page = render_page(watchlists={
+            "core": __import__("options_scanner.models", fromlist=["Watchlist"]).Watchlist(
+                "core", "local", "Core", ("NVDA", "SPY"))
+        }).decode()
+        self.assertIn('name="universe_source"', page)
+        self.assertIn("Watchlist: Core", page)
+        for name in ("min_dte", "max_dte", "min_safety_margin", "min_abs_delta",
+                     "max_abs_delta", "historical_period", "fake"):
+            self.assertIn(f'name="{name}"', page)
+
     def test_watchlist_crud_selection_validation_and_user_isolation(self):
         store = UserWorkspaceStore()
         service = StubService()
