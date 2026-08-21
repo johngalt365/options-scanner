@@ -37,6 +37,14 @@ class UserWorkspaceStore:
     def watchlists_for(self, user_id: str) -> tuple[Watchlist, ...]:
         return self._items_for(user_id, self._watchlists)
 
+    def delete_watchlist(self, user_id: str, watchlist_id: str) -> None:
+        """Delete one of ``user_id``'s lists without crossing user boundaries."""
+        self._require_user(user_id)
+        try:
+            del self._watchlists[user_id][watchlist_id]
+        except KeyError as error:
+            raise KeyError("watchlist desconocida para este usuario") from error
+
     def save_strategy_parameters(self, parameters: StrategyParameters) -> None:
         self._save(parameters, self._strategy_parameters)
 

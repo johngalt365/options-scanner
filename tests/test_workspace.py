@@ -50,6 +50,15 @@ class UserWorkspaceStoreTest(TestCase):
         with self.assertRaises(KeyError):
             self.store.save_watchlist(Watchlist("main", "unknown", "Lista"))
 
+    def test_delete_watchlist_is_user_scoped(self) -> None:
+        item = Watchlist("main", "ana", "Tecnología", ("NVDA",))
+        self.store.save_watchlist(item)
+        with self.assertRaises(KeyError):
+            self.store.delete_watchlist("bruno", "main")
+        self.assertEqual(self.store.watchlists_for("ana"), (item,))
+        self.store.delete_watchlist("ana", "main")
+        self.assertEqual(self.store.watchlists_for("ana"), ())
+
     def test_scan_result_cannot_reference_another_users_configuration(self) -> None:
         self.store.save_strategy_parameters(
             StrategyParameters("private", "ana", "Privada")

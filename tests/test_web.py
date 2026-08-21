@@ -14,6 +14,8 @@ from options_scanner.technical_context import TechnicalContext
 from options_scanner.technical_check import TechnicalCheckResult
 from options_scanner.historical import HistoricalPeriod
 from datetime import date
+from options_scanner.models import User
+from options_scanner.workspace import UserWorkspaceStore
 
 
 def request(app, method="GET", body=""):
@@ -55,6 +57,44 @@ class StatusTransport:
 
 
 class WebTest(TestCase):
+    def test_watchlist_crud_selection_validation_and_user_isolation(self):
+        store = UserWorkspaceStore()
+        service = StubService()
+        ana = create_app(service, workspace_store=store, user=User("ana", "Ana"))
+        create = "action=watchlist_create&watchlist_name=Core&watchlist_tickers=nvda%2C+SPY+nvda"
+        status, page = request(ana, "POST", create)
+        self.assertEqual(status, "200 OK")
+        item = store.watchlists_for("ana")[0]
+        self.assertEqual(item.symbols, ("NVDA", "SPY"))
+        self.assertIn("Watchlist: Core", page)
+        self.assertIn("solo en memoria", page)
+
+        update = (f"action=watchlist_update&watchlist_id={item.id}&watchlist_name=Growth"
+                  "&watchlist_tickers=qqq+MSFT+qqq")
+        self.assertEqual(request(ana, "POST", update)[0], "200 OK")
+        self.assertEqual(store.watchlists_for("ana")[0].symbols, ("QQQ", "MSFT"))
+        scan = FORM.replace("ticker=NVDA", "ticker=") + f"&universe_source=watchlist%3A{item.id}"
+        request(ana, "POST", scan)
+        self.assertEqual([r.ticker for r in service.requests], ["QQQ", "MSFT"])
+
+        for tickers in ("", "%24BAD"):
+            status, _ = request(ana, "POST", "action=watchlist_create&watchlist_name=Bad&watchlist_tickers=" + tickers)
+            self.assertEqual(status, "400 Bad Request")
+        bruno = create_app(StubService(), workspace_store=store, user=User("bruno", "Bruno"))
+        self.assertNotIn("Growth", request(bruno)[1])
+        self.assertEqual(request(bruno, "POST", f"action=watchlist_delete&watchlist_id={item.id}")[0],
+                         "400 Bad Request")
+        self.assertEqual(request(ana, "POST", f"action=watchlist_delete&watchlist_id={item.id}")[0], "200 OK")
+        self.assertEqual(store.watchlists_for("ana"), ())
+
+    def test_create_watchlist_from_current_manual_input(self):
+        store = UserWorkspaceStore()
+        app = create_app(StubService(), workspace_store=store)
+        status, page = request(app, "POST", "action=watchlist_from_manual&ticker=aapl%2C+MSFT+aapl")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(store.watchlists_for("local")[0].symbols, ("AAPL", "MSFT"))
+        self.assertIn("Lista manual", page)
+
     def test_ticker_list_normalizes_separators_case_and_duplicates(self):
         self.assertEqual(parse_tickers(" aaoi, NVDA  aaoi\tspy,QQQ "),
                          ("AAOI", "NVDA", "SPY", "QQQ"))
