@@ -2,7 +2,7 @@ from datetime import date, timedelta
 from unittest import TestCase
 from options_scanner.historical import (DemoHistoricalDataProvider, HistoricalBar, HistoricalPeriod,
                                         IbkrHistoricalDataProvider, map_ibkr_historical_bars)
-from options_scanner.technical_analysis import Pivot, PivotType, ZoneType, atr, cluster_zones, detect_pivots
+from options_scanner.technical_analysis import PriceZone, Pivot, PivotType, ZoneType, atr, cluster_zones, detect_pivots
 from options_scanner.technical_context import StrikePosition, build_technical_context, strike_context
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.web import render_page
@@ -91,3 +91,47 @@ class TechnicalTest(TestCase):
         self.assertIn("Contexto técnico",page); self.assertIn("Histórico no disponible",page)
         self.assertIn("El scan de opciones no se ha visto afectado",page)
         self.assertIn("Frozen",page)
+
+class TechnicalMapTest(TestCase):
+    def zone(self, center, kind=ZoneType.SUPPORT, broken=False):
+        session=date(2026,1,2)
+        return PriceZone(center-1,center+1,center,kind,3,session,60,"media",broken)
+
+    def test_pure_strike_classification_across_multiple_supports(self):
+        from options_scanner.technical_context import classify_strike_against_zones
+        supports=(self.zone(215),self.zone(200),self.zone(185))
+        self.assertEqual(classify_strike_against_zones(220,supports,220).position,StrikePosition.ABOVE_SUPPORT)
+        self.assertEqual(classify_strike_against_zones(215,supports,220).position,StrikePosition.INSIDE_SUPPORT)
+        between=classify_strike_against_zones(208,supports,220)
+        self.assertEqual((between.position,between.support.center),(StrikePosition.BELOW_SUPPORT,215))
+        inside_s2=classify_strike_against_zones(200,supports,220)
+        self.assertEqual((inside_s2.position,inside_s2.support.center),(StrikePosition.INSIDE_SUPPORT,200))
+        empty=classify_strike_against_zones(200,(),220)
+        self.assertIsNone(empty.position); self.assertIsNone(empty.support)
+
+    def test_active_zone_map_order_and_broken_zone_exclusion(self):
+        from unittest.mock import patch
+        detected=(self.zone(180),self.zone(210),self.zone(195),self.zone(230,ZoneType.RESISTANCE),
+                  self.zone(225,ZoneType.RESISTANCE),self.zone(215,broken=True))
+        series=bars(tuple([220]*10))
+        with patch("options_scanner.technical_context.detect_pivots",return_value=()), \
+             patch("options_scanner.technical_context.cluster_zones",return_value=detected):
+            context=build_technical_context("X",HistoricalPeriod.SIX_MONTHS,series,220)
+        self.assertEqual([z.center for z in context.supports_below_price],[210,195,180])
+        self.assertEqual([z.center for z in context.resistances_above_price],[225,230])
+        self.assertNotIn(215,[z.center for z in context.supports_below_price])
+
+    def test_chart_has_axes_labels_and_caps_visible_zones(self):
+        from dataclasses import replace
+        series=bars(tuple(200+i for i in range(10)))
+        base=build_technical_context("X",HistoricalPeriod.SIX_MONTHS,series,210)
+        supports=tuple(self.zone(v) for v in (208,205,202,199))
+        resistances=tuple(self.zone(v,ZoneType.RESISTANCE) for v in (212,215,218))
+        context=replace(base,zones=supports+resistances,supports_below_price=supports,
+                        resistances_above_price=resistances,nearest_support=supports[0],
+                        nearest_resistance=resistances[0])
+        result=ScanResult((),ScanMetrics(),.1,underlying_price=210,market_data_status="Frozen",technical_context=context)
+        page=render_page(result=result).decode()
+        for label in (">S1<",">S2<",">S3<",">R1<",">R2<","Precio actual $210.00","Último contacto"):
+            self.assertIn(label,page)
+        self.assertNotIn(">S4<",page); self.assertNotIn(">R3<",page)

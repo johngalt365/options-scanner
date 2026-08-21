@@ -33,6 +33,8 @@ class PriceZone:
     broken: bool = False
     inverted: bool = False
     first_contact: date | None = None
+    reaction: float = 0.0
+    persistence: float = 0.0
 
 
 def atr(bars: tuple[HistoricalBar, ...], period: int = 14) -> tuple[float, ...]:
@@ -93,5 +95,6 @@ def cluster_zones(pivots: tuple[Pivot, ...], bars: tuple[HistoricalBar, ...], *,
             later=[b for b in bars if b.session>last]
             broken=(any(b.close < lower-break_atr*current_atr for b in later) if zone_kind==ZoneType.SUPPORT
                     else any(b.close > upper+break_atr*current_atr for b in later))
-            zones.append(PriceZone(lower,upper,center,zone_kind,len(group),last,round(score,1),strength,broken,False,first))
+            zones.append(PriceZone(lower,upper,center,zone_kind,len(group),last,round(score,1),strength,
+                                   broken,False,first,round(reaction,3),round(persistence,3)))
     return tuple(sorted(zones,key=lambda z:z.center))

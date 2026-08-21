@@ -194,48 +194,77 @@ def _technical_chart(result: ScanResult | None) -> str:
     period = context.period.value if context else result.summary.historical_period
     period_labels = {"3m": "3M", "6m": "6M", "1y": "1A"}
     current = context.current_price if context else result.underlying_price
-    def metric(label, value, distance=None):
-        if value is None:
+    supports = context.supports_below_price[:3] if context else ()
+    resistances = context.resistances_above_price[:2] if context else ()
+
+    def metric(label, zone):
+        if zone is None or current is None:
             rendered = '<span class="na">N/D</span>'
         else:
-            rendered = f'<strong>${value.center:.2f}</strong>'
-            if distance is not None:
-                sign = "-" if label.startswith("Soporte") else "+"
-                rendered += f' <span>{sign}{distance:.2f} %</span>'
+            distance = (zone.center-current)/current*100
+            rendered = (f'<strong>${zone.lower:.2f}–${zone.upper:.2f}</strong>'
+                        f'<span class="zone-strength">{zone.strength.capitalize()}</span>'
+                        f'<span>{distance:+.2f} %</span>')
         return f'<div><dt>{label}</dt><dd>{rendered}</dd></div>'
-    support = context.nearest_support if context else None
-    resistance = context.nearest_resistance if context else None
+
     last_session = context.bars[-1].session.isoformat() if context and context.bars else "N/D"
     identity = "technical-" + "".join(ch for ch in (context.symbol if context else "result") if ch.isalnum()).lower()
+    zone_cards = "".join(metric(f"S{i}", z) for i, z in enumerate(supports, 1))
+    zone_cards += "".join(metric(f"R{i}", z) for i, z in enumerate(resistances, 1))
     summary = (
-        '<div class="technical-title"><h2>Contexto técnico</h2></div>'
-        '<dl class="technical-metrics">'
+        '<div class="technical-title"><h2>Contexto técnico</h2></div><dl class="technical-metrics">'
         f'<div><dt>Precio actual</dt><dd>{f"${current:.2f}" if current is not None else "N/D"}</dd></div>'
-        f'{metric("Soporte cercano", support, context.support_distance_percent if context else None)}'
-        f'{metric("Resistencia cercana", resistance, context.resistance_distance_percent if context else None)}'
-        f'<div><dt>Periodo</dt><dd>{period_labels.get(period, period)}</dd></div>'
+        f'{zone_cards}<div><dt>Periodo</dt><dd>{period_labels.get(period, period)}</dd></div>'
         f'<div><dt>Última sesión disponible</dt><dd>{last_session}</dd></div></dl>'
     )
     if context is None or not context.bars:
         return f'<section class="technical">{summary}<div class="history-unavailable" role="status"><strong>Histórico no disponible</strong><p>IBKR no devolvió barras históricas utilizables. El scan de opciones no se ha visto afectado.</p></div></section>'
-    bars=context.bars; width,height,pad=1000,360,38
-    prices=[value for b in bars for value in (b.low,b.high)]+[context.current_price]
-    for zone in context.zones: prices.extend((zone.lower,zone.upper))
-    low,high=min(prices),max(prices); span=max(high-low,1e-9)
-    x=lambda i: pad+i*(width-2*pad)/max(1,len(bars)-1)
-    y=lambda price: pad+(high-price)*(height-2*pad)/span
-    zones="".join(f'<rect class="zone {z.kind.value}{" broken" if z.broken else ""}" x="{pad}" y="{y(z.upper):.1f}" width="{width-2*pad}" height="{max(2,y(z.lower)-y(z.upper)):.1f}"><title>{z.kind.value}: ${z.lower:.2f}–${z.upper:.2f}; {z.contacts} contactos; score {z.score:.1f}</title></rect>' for z in context.zones)
-    path=" ".join(("M" if i==0 else "L")+f"{x(i):.1f},{y(b.close):.1f}" for i,b in enumerate(bars))
-    strike_lines="".join(f'<line class="strike" x1="{pad}" x2="{width-pad}" y1="{y(s.strike):.1f}" y2="{y(s.strike):.1f}"><title>Strike ${s.strike:.2f}</title></line>' for s in context.strikes)
-    current_y=y(context.current_price)
-    def zone_message(label,zone):
-        if not zone:return f"<p>{label}: no disponible</p>"
-        sessions=sum(1 for b in bars if b.session>zone.last_contact)
-        return f"<p>{label}: <strong>${zone.lower:.2f}–${zone.upper:.2f}</strong> · Último contacto: hace {sessions} sesiones · Fuerza: {zone.strength}</p>"
-    names={StrikePosition.ABOVE:"por encima de la zona de soporte principal",StrikePosition.INSIDE:"dentro de la zona de soporte",StrikePosition.BELOW:"por debajo de la zona de soporte principal"}
-    strike_messages="".join(f"<li>Strike ${s.strike:.2f}: {names.get(s.position,'sin soporte activo cercano')}</li>" for s in context.strikes)
+
+    bars = context.bars
+    visible = tuple(supports) + tuple(resistances)
+    width, height, left, right, top, bottom = 1000, 400, 62, 18, 24, 42
+    prices = [value for b in bars for value in (b.low, b.high)] + [context.current_price]
+    for zone in visible:
+        prices.extend((zone.lower, zone.upper))
+    low, high = min(prices), max(prices)
+    margin = max((high-low)*.04, context.current_price*.002)
+    low, high = low-margin, high+margin
+    span = max(high-low, 1e-9)
+    x = lambda i: left+i*(width-left-right)/max(1, len(bars)-1)
+    y = lambda price: top+(high-price)*(height-top-bottom)/span
+
+    zone_svg = []
+    for i, zone in enumerate(supports, 1):
+        alpha = "strong" if zone.strength == "fuerte" else "medium" if zone.strength == "media" else "weak"
+        zone_svg.append(f'<rect class="zone support {alpha}" x="{left}" y="{y(zone.upper):.1f}" width="{width-left-right}" height="{max(2,y(zone.lower)-y(zone.upper)):.1f}"/><text class="zone-label support-label" x="{left+8}" y="{y(zone.center)+4:.1f}">S{i}</text>')
+    for i, zone in enumerate(resistances, 1):
+        alpha = "strong" if zone.strength == "fuerte" else "medium" if zone.strength == "media" else "weak"
+        zone_svg.append(f'<rect class="zone resistance {alpha}" x="{left}" y="{y(zone.upper):.1f}" width="{width-left-right}" height="{max(2,y(zone.lower)-y(zone.upper)):.1f}"/><text class="zone-label resistance-label" x="{left+8}" y="{y(zone.center)+4:.1f}">R{i}</text>')
+    y_ticks = []
+    for i in range(5):
+        price = low+(high-low)*i/4
+        yy = y(price)
+        y_ticks.append(f'<line class="grid" x1="{left}" x2="{width-right}" y1="{yy:.1f}" y2="{yy:.1f}"/><text class="axis-label" x="{left-7}" y="{yy+4:.1f}" text-anchor="end">${price:.2f}</text>')
+    date_ticks = []
+    for index in sorted({0, (len(bars)-1)//2, len(bars)-1}):
+        xx=x(index)
+        date_ticks.append(f'<line class="axis-tick" x1="{xx:.1f}" x2="{xx:.1f}" y1="{height-bottom}" y2="{height-bottom+5}"/><text class="axis-label" x="{xx:.1f}" y="{height-15}" text-anchor="middle">{bars[index].session.strftime("%d %b %Y")}</text>')
+    path = " ".join(("M" if i == 0 else "L")+f"{x(i):.1f},{y(b.close):.1f}" for i,b in enumerate(bars))
+    strike_lines = "".join(f'<line class="strike" x1="{left}" x2="{width-right}" y1="{y(item.strike):.1f}" y2="{y(item.strike):.1f}"><title>Strike ${item.strike:.2f}</title></line>' for item in context.strikes if low <= item.strike <= high)
+    current_y = y(context.current_price)
+    current_line = f'<line class="current" x1="{left}" x2="{width-right}" y1="{current_y:.1f}" y2="{current_y:.1f}"/><text class="current-label" x="{width-right-5}" y="{current_y-6:.1f}" text-anchor="end">Precio actual ${context.current_price:.2f}</text>'
+
+    rows = []
+    for label, zone in [(f"S{i}", z) for i,z in enumerate(supports,1)] + [(f"R{i}", z) for i,z in enumerate(resistances,1)]:
+        distance=(zone.center-context.current_price)/context.current_price*100
+        sessions=sum(1 for bar in bars if bar.session > zone.last_contact)
+        rows.append(f'<tr><th scope="row">{label}</th><td>${zone.lower:.2f}–${zone.upper:.2f}</td><td>{distance:+.2f} %</td><td>{zone.strength.capitalize()}</td><td>{zone.contacts}</td><td>{sessions} sesiones</td></tr>')
+    explanation = '<div class="zone-table-wrap"><table class="zone-table"><thead><tr><th>Zona</th><th>Rango</th><th>Distancia</th><th>Fuerza</th><th>Contactos</th><th>Último contacto</th></tr></thead><tbody>'+''.join(rows)+'</tbody></table></div>'
+    names={StrikePosition.ABOVE_SUPPORT:"por encima del soporte relevante", StrikePosition.INSIDE_SUPPORT:"dentro del soporte relevante", StrikePosition.BELOW_SUPPORT:"por debajo del soporte relevante"}
+    strike_messages="".join(f'<li>Strike ${item.strike:.2f}: {names.get(item.position,"sin soporte activo")}.</li>' for item in context.strikes)
     buttons = "".join(f'<button type="button" class="period-button{" active" if value == period else ""}" data-period="{value}" aria-pressed="{"true" if value == period else "false"}">{label}</button>' for value,label in period_labels.items())
-    return f'''<section class="technical" data-ticker="{escape(context.symbol)}">{summary}<details id="{identity}"><summary><span aria-hidden="true">▥</span> Ver gráfico</summary><div class="chart-panel"><div class="period-selector" aria-label="Periodo histórico">{buttons}</div><svg role="img" aria-label="Gráfico histórico diario con zonas de soporte, resistencia, precio actual y strikes" viewBox="0 0 {width} {height}" preserveAspectRatio="none">{zones}<path class="price" d="{path}"/><line class="current" x1="{pad}" x2="{width-pad}" y1="{current_y:.1f}" y2="{current_y:.1f}"/>{strike_lines}</svg><div class="technical-context">{zone_message('Soporte activo más cercano',context.nearest_support)}{zone_message('Resistencia activa más cercana',context.nearest_resistance)}<ul>{strike_messages}</ul><p class="disclaimer">Las zonas se derivan del comportamiento histórico del precio y no garantizan reacciones futuras. No constituyen una recomendación de inversión.</p></div></div></details></section>'''
+    svg = f'<svg role="img" aria-label="Gráfico histórico diario con S1 S2 S3 R1 R2, ejes, precio actual y strikes" viewBox="0 0 {width} {height}">{"".join(y_ticks)}{"".join(zone_svg)}<path class="price" d="{path}"/>{current_line}{strike_lines}{"".join(date_ticks)}</svg>'
+    return f'<section class="technical" data-ticker="{escape(context.symbol)}">{summary}<details id="{identity}"><summary><span aria-hidden="true">▥</span> Ver gráfico</summary><div class="chart-panel"><div class="period-selector" aria-label="Periodo histórico">{buttons}</div>{svg}{explanation}<div class="technical-context"><ul>{strike_messages}</ul><p class="disclaimer">Las zonas se derivan del comportamiento histórico del precio y no garantizan reacciones futuras. Son contexto informativo y no constituyen una recomendación de inversión.</p></div></div></details></section>'
 
 
 def render_page(values: dict[str, str] | None = None, result: ScanResult | None = None, error: str | None = None) -> bytes:
@@ -250,7 +279,7 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
 body{{font:15px system-ui;margin:0;background:#f4f6fa;color:#182033}}main{{max-width:1500px;margin:auto;padding:2rem}}h1{{margin:0}}.note{{color:#556}}.top{{display:flex;justify-content:space-between;gap:1rem;align-items:start}}.connection{{background:white;padding:.7rem;border-radius:8px;min-width:220px}}.dot{{display:inline-block;width:.75rem;height:.75rem;border-radius:50%;background:#818895;margin-right:.4rem}}.connected .dot{{background:#198754}}.login .dot{{background:#e58a00}}.disconnected .dot{{background:#c52d36}}.demo .dot{{background:#818895}}.connection button{{font-size:.8rem;padding:.35rem .6rem;margin-top:.4rem}}.connection small{{display:block;color:#596273;margin-top:.25rem}}
 form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padding:1.25rem;border-radius:10px;box-shadow:0 2px 8px #0001}}label{{display:grid;gap:.35rem;font-weight:600}}input{{padding:.55rem;border:1px solid #aab3c5;border-radius:5px;width:9rem}}button{{background:#2358d5;color:white;border:0;border-radius:5px;padding:.7rem 1.4rem;font-weight:700;cursor:pointer}}button:disabled{{cursor:not-allowed;opacity:.65}}.mode{{display:flex;align-items:center;gap:.4rem}}.mode input{{width:auto}}
 .interpretation{{background:white;padding:1rem 1.2rem;border-radius:8px;border-left:4px solid #60708c;margin-top:1rem}}.interpretation h2{{margin-top:0}}.interpretation-message{{margin:.45rem 0;padding:.45rem .65rem;border-radius:4px}}.interpretation-message.success{{background:#e9f7ef;border-left:3px solid #198754}}.interpretation-message.neutral{{background:#eef3fb;border-left:3px solid #60708c}}.interpretation-message.warning{{background:#fff7db;border-left:3px solid #d18a00}}.interpretation-message.error{{background:#fff0f0;border-left:3px solid #c22}}.interpretation ul{{margin-bottom:0}}.interpretation dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem}}.interpretation dl div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}
-.technical{{background:white;padding:1rem;border-radius:8px}}.technical-title h2{{margin:0 0 .8rem}}.technical-metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:0}}.technical-metrics>div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}.technical details{{border-top:1px solid #dde2ea;padding-top:.7rem}}.technical details>summary{{color:#2358d5;width:max-content}}.chart-panel{{margin-top:.8rem}}.period-selector{{display:flex;gap:.35rem;margin-bottom:.6rem}}.period-button{{padding:.4rem .7rem;background:#e7ebf3;color:#263451}}.period-button.active{{background:#2358d5;color:white}}.technical svg{{width:100%;height:360px;background:#fafbfd;border:1px solid #dce2ec}}.price{{fill:none;stroke:#254fbd;stroke-width:2}}.zone.support{{fill:#2ca66f22}}.zone.resistance{{fill:#db5a5522}}.zone.broken{{opacity:.3}}.current{{stroke:#182033;stroke-width:1.5;stroke-dasharray:7 4}}.strike{{stroke:#8b55bb;stroke-width:1;stroke-dasharray:3 4}}.technical-context{{background:#f6f8fb;padding:.8rem 1rem;margin-top:.7rem}}.history-unavailable{{background:#fff7db;border-left:4px solid #d18a00;padding:.75rem;margin-top:.8rem}}.history-unavailable p{{margin:.3rem 0 0}}.disclaimer{{color:#596273;font-size:.9rem}}
+.technical{{background:white;padding:1rem;border-radius:8px}}.technical-title h2{{margin:0 0 .8rem}}.technical-metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:0}}.technical-metrics>div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}.technical details{{border-top:1px solid #dde2ea;padding-top:.7rem}}.technical details>summary{{color:#2358d5;width:max-content}}.chart-panel{{margin-top:.8rem}}.period-selector{{display:flex;gap:.35rem;margin-bottom:.6rem}}.period-button{{padding:.4rem .7rem;background:#e7ebf3;color:#263451}}.period-button.active{{background:#2358d5;color:white}}.technical svg{{width:100%;height:360px;background:#fafbfd;border:1px solid #dce2ec}}.price{{fill:none;stroke:#254fbd;stroke-width:2}}.zone.support{{fill:#2ca66f}}.zone.resistance{{fill:#db5a55}}.zone.weak{{opacity:.10}}.zone.medium{{opacity:.18}}.zone.strong{{opacity:.27}}.zone-label{{font-weight:800;font-size:14px}}.support-label{{fill:#176b48}}.resistance-label{{fill:#9b302c}}.grid{{stroke:#dfe4ec;stroke-width:1}}.axis-tick{{stroke:#778196}}.axis-label{{fill:#596273;font-size:11px}}.current-label{{fill:#182033;font-size:12px;font-weight:700}}.current{{stroke:#182033;stroke-width:1.5;stroke-dasharray:7 4}}.strike{{stroke:#8b55bb;stroke-width:1;stroke-dasharray:3 4}}.zone-strength{{display:block;font-size:.8rem;font-weight:500;text-transform:capitalize}}.zone-table-wrap{{overflow:auto;margin-top:.8rem}}.zone-table{{font-size:.9rem}}.zone-table th{{background:#eef1f6;color:#263451}}.technical-context{{background:#f6f8fb;padding:.8rem 1rem;margin-top:.7rem}}.history-unavailable{{background:#fff7db;border-left:4px solid #d18a00;padding:.75rem;margin-top:.8rem}}.history-unavailable p{{margin:.3rem 0 0}}.disclaimer{{color:#596273;font-size:.9rem}}
 .scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
 </style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading.</p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div><form method="post">
 <label>Ticker<input name="ticker" value="{escape(v['ticker'])}" required></label><label>Min DTE<input type="number" name="min_dte" min="0" value="{escape(v['min_dte'])}" required></label><label>Max DTE<input type="number" name="max_dte" min="0" value="{escape(v['max_dte'])}" required></label>

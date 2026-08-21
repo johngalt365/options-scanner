@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 import time
 import logging
@@ -82,6 +82,8 @@ class ScanMetrics:
     historical_status: str = "not_requested"
     technical_supports: int = 0
     technical_resistances: int = 0
+    technical_supports_visible: int = 0
+    technical_resistances_visible: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,18 +179,32 @@ class PutScanService:
             technical_started = self._clock()
             technical = build_technical_context(request.ticker, request.historical_period, bars, price,
                                                 (candidate.strike for candidate in ranked if candidate.complete))
-            summary.technical_supports = sum(1 for z in technical.zones if z.kind.value == "support" and not z.broken)
-            summary.technical_resistances = sum(1 for z in technical.zones if z.kind.value == "resistance" and not z.broken)
+            summary.technical_supports = len(technical.supports_below_price)
+            summary.technical_resistances = len(technical.resistances_above_price)
+            summary.technical_supports_visible = min(3, summary.technical_supports)
+            summary.technical_resistances_visible = min(2, summary.technical_resistances)
+            strike_contexts = {item.strike: item for item in technical.strikes}
+            ranked = tuple(
+                replace(candidate,
+                    nearest_support_below=strike_contexts[candidate.strike].support,
+                    support_position=strike_contexts[candidate.strike].position,
+                    distance_to_support_pct=strike_contexts[candidate.strike].distance_percent,
+                    support_strength=(strike_contexts[candidate.strike].support.strength
+                                      if strike_contexts[candidate.strike].support else None))
+                for candidate in ranked
+            )
             summary.phase_seconds["technical_analysis"] = max(0.0, self._clock() - technical_started)
             if verbose:
                 logger.info(
                     "historical/request=%d historical/bars_received=%d historical/bars_valid=%d "
-                    "historical/period=%s historical/status=%s technical/supports=%d "
-                    "technical/resistances=%d historical_data=%.3fs technical_analysis=%.3fs",
+                    "historical/period=%s historical/status=%s technical/supports_active=%d "
+                    "technical/resistances_active=%d technical/supports_visible=%d "
+                    "technical/resistances_visible=%d historical_data=%.3fs technical_analysis=%.3fs",
                     summary.historical_request, summary.historical_bars_received,
                     summary.historical_bars_valid, summary.historical_period,
                     summary.historical_status, summary.technical_supports,
-                    summary.technical_resistances, summary.phase_seconds["historical_data"],
+                    summary.technical_resistances, summary.technical_supports_visible,
+                    summary.technical_resistances_visible, summary.phase_seconds["historical_data"],
                     summary.phase_seconds["technical_analysis"],
                 )
         return ScanResult(ranked, summary, max(0.0, self._clock() - started), incomplete,
