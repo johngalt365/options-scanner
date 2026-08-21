@@ -401,3 +401,9 @@ continúa con los demás. Para generar un informe visual bajo demanda, añade
 `--charts technical-check.html`; el HTML deja todos los gráficos colapsados por
 defecto. Este flujo solo resuelve el subyacente y su histórico diario, y no
 descubre ni solicita contratos de opciones.
+
+Con la interfaz local iniciada, `http://127.0.0.1:8000/technical-check` ofrece
+la misma validación 6M como screener separado. La tabla obtiene las barras para
+calcular las zonas, pero no incluye ningún SVG inicialmente: el botón **📈 Ver
+gráfico** solicita y abre únicamente el detalle del ticker elegido. Un fallo se
+muestra como `No disponible` sin impedir que las demás filas terminen.

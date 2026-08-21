@@ -247,6 +247,7 @@ class IbkrMarketDataProvider:
         self.last_underlying: Underlying | None = None
         self.last_underlying_conid: str | None = None
         self.last_historical_bars_received = 0
+        self.last_underlying_market_data_availability: MarketDataAvailability | None = None
 
     def _get(self, path: str, params: Mapping[str, str]) -> Any:
         """Count safe endpoint names while leaving request details private."""
@@ -302,6 +303,8 @@ class IbkrMarketDataProvider:
         if not rows:
             raise IncompleteDataError("IBKR no devolvió el snapshot del subyacente; la respuesta fue parcial o incompleta")
         row = rows[0]
+        if "6509" in row:
+            self.last_underlying_market_data_availability = _market_data_availability(row.get("6509"))
         price = _number(row, "31")
         if price is None:
             bid = _number(row, "84")

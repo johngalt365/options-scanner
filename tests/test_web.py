@@ -5,6 +5,8 @@ from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
 from options_scanner.web import _interpretation, _rows, create_app, ibkr_connection_status
+from options_scanner.historical import HistoricalBar
+from datetime import timedelta
 from options_scanner.scanner import rank_candidates
 from options_scanner.technical_analysis import PriceZone, ZoneType
 from datetime import date
@@ -49,6 +51,35 @@ class StatusTransport:
 
 
 class WebTest(TestCase):
+    def test_technical_screener_is_separate_and_charts_are_lazy_and_independent(self):
+        symbols = ("NVDA", "AAPL", "MSFT", "AMZN", "TSLA")
+        class Provider:
+            def get_underlying(self, symbol):
+                from options_scanner.models import Underlying
+                return Underlying(symbol, 100 + symbols.index(symbol))
+            def get_historical_bars(self, symbol, period):
+                start = date(2026, 1, 1)
+                return tuple(HistoricalBar(start + timedelta(days=i), 100, 102, 98, 100 + i % 3)
+                             for i in range(40))
+        app = create_app(StubService(), technical_price_provider=Provider())
+        captured = {}
+        environ = {"PATH_INFO": "/technical-check", "REQUEST_METHOD": "GET", "wsgi.input": BytesIO()}
+        page = b"".join(app(environ, lambda status, headers: captured.update(status=status))).decode()
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertEqual([page.index(f'data-ticker="{symbol}"') for symbol in symbols],
+                         sorted(page.index(f'data-ticker="{symbol}"') for symbol in symbols))
+        self.assertEqual(page.count('class="chart-button"'), 5)
+        self.assertNotIn('<svg role="img"', page)
+        self.assertIn("drawer.hidden=false", page)
+        charts = []
+        for symbol in ("NVDA", "AAPL"):
+            chart_env = {"PATH_INFO": "/technical-check/chart", "QUERY_STRING": f"ticker={symbol}",
+                         "REQUEST_METHOD": "GET", "wsgi.input": BytesIO()}
+            charts.append(b"".join(app(chart_env, lambda status, headers: None)).decode())
+        self.assertIn("NVDA", charts[0])
+        self.assertNotIn("AAPL", charts[0])
+        self.assertIn("AAPL", charts[1])
+
     def interpretation(self, **metrics):
         market_data_status = metrics.pop("market_data_status", None)
         candidates = metrics.pop("candidates", ())

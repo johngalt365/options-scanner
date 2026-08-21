@@ -12,8 +12,50 @@ from options_scanner.ibkr import GatewayUnavailableError, IbkrError, NotAuthenti
 from options_scanner.scan_service import PutScanService, ScanRequest, ScanResult
 from options_scanner.historical import HistoricalPeriod
 from options_scanner.technical_context import StrikePosition
+from options_scanner.technical_check import (DEFAULT_TICKERS, TechnicalCheckResult,
+                                             _svg_chart, _visible_zones, check_tickers)
+from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
 
 logger = logging.getLogger(__name__)
+
+
+def render_technical_screener(results: tuple[TechnicalCheckResult, ...]) -> bytes:
+    """Render the compact validation view; charts are fetched separately."""
+    rows = []
+    for result in results:
+        zones = dict(_visible_zones(result))
+        def zone(label: str) -> str:
+            item = zones[label]
+            if item is None:
+                return '<span class="na">N/D</span>'
+            return (f'<strong>${item.center:.2f}</strong><small>{escape(item.strength)} · '
+                    f'{item.contacts} contactos · {item.last_contact.isoformat()}</small>')
+        last_session = (result.context.bars[-1].session.isoformat()
+                        if result.context and result.context.bars else "N/D")
+        state_class = " unavailable" if result.error or result.historical_status != "ok" else ""
+        price = f"${result.price:.2f}" if result.price is not None else "N/D"
+        rows.append(
+            f'<tr data-ticker="{escape(result.symbol)}" class="{state_class.strip()}">'
+            f'<th scope="row">{escape(result.symbol)}</th><td>{price}</td>'
+            f'<td>{escape(result.market_data_status if not result.error else "No disponible")}</td>'
+            + "".join(f"<td>{zone(label)}</td>" for label in ("S1", "S2", "S3", "R1", "R2"))
+            + f'<td>{result.bar_count}</td><td>{last_session}</td><td>{result.historical_seconds + result.technical_seconds:.3f} s</td>'
+              f'<td><button class="chart-button" data-ticker="{escape(result.symbol)}" type="button">📈 Ver gráfico</button>'
+              f'<div class="chart-drawer" data-chart="{escape(result.symbol)}" hidden></div></td></tr>'
+        )
+    body = "".join(rows)
+    return f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Validación técnica</title><style>
+body{{font:14px system-ui;background:#f4f6fa;color:#182033;margin:0}}main{{max-width:1600px;margin:auto;padding:1.5rem}}a{{color:#2358d5}}.scroll{{overflow:auto}}table{{border-collapse:collapse;width:100%;background:white;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right;vertical-align:top}}th{{text-align:left;background:#263451;color:white}}thead th{{text-align:right}}thead th:first-child{{text-align:left}}small{{display:block;color:#596273}}button{{border:0;border-radius:5px;background:#2358d5;color:white;padding:.55rem;cursor:pointer}}.na,.unavailable{{color:#788190}}.chart-drawer{{position:fixed;inset:8% 5%;z-index:2;background:white;padding:1rem;box-shadow:0 5px 35px #0005;overflow:auto}}.chart-drawer svg{{width:100%;height:auto}}.chart-drawer button{{float:right}}</style></head><body><main>
+<nav><a href="/">← Scanner principal</a></nav><h1>Validación técnica multi-ticker</h1><p>Histórico 6M. Los gráficos se generan únicamente al abrir cada activo.</p>
+<div class="scroll"><table><thead><tr><th>Ticker</th><th>Precio</th><th>Estado</th><th>S1</th><th>S2</th><th>S3</th><th>R1</th><th>R2</th><th>Barras</th><th>Última sesión</th><th>Tiempo</th><th>Detalle</th></tr></thead><tbody>{body}</tbody></table></div>
+<script>document.addEventListener('click',async event=>{{const open=event.target.closest('.chart-button');if(open){{const ticker=open.dataset.ticker,drawer=document.querySelector('[data-chart="'+ticker+'"]');if(drawer.hidden){{drawer.hidden=false;drawer.innerHTML='<button type="button" class="chart-close">Cerrar</button><p>Cargando gráfico…</p>';const response=await fetch('/technical-check/chart?ticker='+encodeURIComponent(ticker));drawer.innerHTML='<button type="button" class="chart-close">Cerrar</button>'+(response.ok?await response.text():'<p>Gráfico no disponible.</p>')}}return}}const close=event.target.closest('.chart-close');if(close)close.parentElement.hidden=true}});</script>
+</main></body></html>'''.encode()
+
+
+def render_technical_chart(result: TechnicalCheckResult | None) -> bytes:
+    if result is None or result.context is None or not result.context.bars:
+        return b'<p role="status">Grafico no disponible.</p>'
+    return _svg_chart(result.context).encode()
 
 
 def ibkr_connection_status(transport: object) -> dict[str, str]:
@@ -326,7 +368,7 @@ form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padd
 .technical{{background:white;padding:1rem;border-radius:8px}}.technical-title h2{{margin:0 0 .8rem}}.technical-metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin:0}}.technical-metrics>div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}.technical details{{border-top:1px solid #dde2ea;padding-top:.7rem}}.technical details>summary{{color:#2358d5;width:max-content}}.chart-panel{{margin-top:.8rem}}.period-selector{{display:flex;gap:.35rem;margin-bottom:.6rem}}.period-button{{padding:.4rem .7rem;background:#e7ebf3;color:#263451}}.period-button.active{{background:#2358d5;color:white}}.technical svg{{width:100%;height:360px;background:#fafbfd;border:1px solid #dce2ec}}.price{{fill:none;stroke:#254fbd;stroke-width:2}}.zone.support{{fill:#2ca66f}}.zone.resistance{{fill:#db5a55}}.zone.weak{{opacity:.10}}.zone.medium{{opacity:.18}}.zone.strong{{opacity:.27}}.zone-label{{font-weight:800;font-size:14px}}.support-label{{fill:#176b48}}.resistance-label{{fill:#9b302c}}.grid{{stroke:#dfe4ec;stroke-width:1}}.axis-tick{{stroke:#778196}}.axis-label{{fill:#596273;font-size:11px}}.current-label{{fill:#182033;font-size:12px;font-weight:700}}.current{{stroke:#182033;stroke-width:1.5;stroke-dasharray:7 4}}.strike{{stroke:#8b55bb;stroke-width:1;stroke-dasharray:3 4}}.zone-strength{{display:block;font-size:.8rem;font-weight:500;text-transform:capitalize}}.zone-table-wrap{{overflow:auto;margin-top:.8rem}}.zone-table{{font-size:.9rem}}.zone-table th{{background:#eef1f6;color:#263451}}.technical-context{{background:#f6f8fb;padding:.8rem 1rem;margin-top:.7rem}}.history-unavailable{{background:#fff7db;border-left:4px solid #d18a00;padding:.75rem;margin-top:.8rem}}.history-unavailable p{{margin:.3rem 0 0}}.disclaimer{{color:#596273;font-size:.9rem}}
 .candidate-technical{{margin:0;min-width:10rem;text-align:left}}.candidate-technical summary{{white-space:nowrap}}.candidate-technical dl{{display:grid;grid-template-columns:repeat(2,minmax(7rem,1fr));gap:.35rem;margin:.6rem 0 0}}.candidate-technical dl div{{white-space:normal;background:#f4f6fa;padding:.35rem}}.candidate-technical dd{{font-size:.9rem}}.technical-compact{{font-weight:650}}
 .scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
-</style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading.</p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div><form method="post">
+</style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading. <a href="/technical-check">Validación multi-ticker</a></p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div><form method="post">
 <label>Ticker<input name="ticker" value="{escape(v['ticker'])}" required></label><label>Min DTE<input type="number" name="min_dte" min="0" value="{escape(v['min_dte'])}" required></label><label>Max DTE<input type="number" name="max_dte" min="0" value="{escape(v['max_dte'])}" required></label>
 <label>Margen mínimo (%)<input type="number" name="min_safety_margin" min="0" max="100" step="0.01" value="{escape(v['min_safety_margin'])}" required></label><label>|Delta| mínima<input type="number" name="min_abs_delta" min="0" max="1" step="0.01" value="{escape(v['min_abs_delta'])}" required></label><label>|Delta| máxima<input type="number" name="max_abs_delta" min="0" max="1" step="0.01" value="{escape(v['max_abs_delta'])}" required></label>
 <label>Histórico<select name="historical_period"><option value="3m"{' selected' if v['historical_period']=='3m' else ''}>3M</option><option value="6m"{' selected' if v['historical_period']=='6m' else ''}>6M</option><option value="1y"{' selected' if v['historical_period']=='1y' else ''}>1A</option></select></label>
@@ -343,10 +385,27 @@ document.addEventListener('click',event=>{{const button=event.target.closest('.p
     return html.encode()
 
 
-def create_app(service: PutScanService | None = None, *, base_url: str = "https://localhost:5000/v1/api", status_transport: object | None = None):
+def create_app(service: PutScanService | None = None, *, base_url: str = "https://localhost:5000/v1/api", status_transport: object | None = None,
+               technical_price_provider=None, technical_history_provider=None):
     scanner = service or PutScanService()
     transport = status_transport or __import__("options_scanner.ibkr", fromlist=["ClientPortalTransport"]).ClientPortalTransport(base_url, allow_insecure_tls=True, timeout=2.0)
+    technical_cache: dict[str, TechnicalCheckResult] = {}
     def application(environ, start_response):
+        path = environ.get("PATH_INFO", "/")
+        if path == "/technical-check" and environ.get("REQUEST_METHOD") == "GET":
+            provider = technical_price_provider or IbkrMarketDataProvider(ClientPortalTransport(base_url, allow_insecure_tls=True))
+            results = check_tickers(DEFAULT_TICKERS, HistoricalPeriod.SIX_MONTHS, provider,
+                                    technical_history_provider)
+            technical_cache.update((item.symbol, item) for item in results)
+            body = render_technical_screener(results)
+            start_response("200 OK", [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store")])
+            return [body]
+        if path == "/technical-check/chart" and environ.get("REQUEST_METHOD") == "GET":
+            ticker = parse_qs(environ.get("QUERY_STRING", "")).get("ticker", [""])[0].upper()
+            body = render_technical_chart(technical_cache.get(ticker))
+            status = "200 OK" if ticker in technical_cache else "404 Not Found"
+            start_response(status, [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store")])
+            return [body]
         if environ.get("PATH_INFO") == "/ibkr-status" and environ.get("REQUEST_METHOD") == "GET":
             body = json.dumps(ibkr_connection_status(transport)).encode()
             start_response("200 OK", [("Content-Type", "application/json; charset=utf-8"), ("Cache-Control", "no-store")])
