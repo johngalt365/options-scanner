@@ -1,7 +1,9 @@
 from datetime import date
 from unittest import TestCase
+from unittest.mock import patch
 
 from options_scanner.scan_service import PutScanService, ScanRequest
+from options_scanner.models import Underlying
 
 
 class ScanRequestTest(TestCase):
@@ -39,3 +41,35 @@ class ScanRequestTest(TestCase):
         self.assertEqual(result.market_data_status, "Simulado")
         self.assertTrue(result.simulated)
         self.assertIsNotNone(result.updated_at)
+        self.assertIsNotNone(result.technical_context)
+
+    def test_history_failure_does_not_invalidate_live_option_scan_or_leak_details(self):
+        class Provider:
+            last_underlying=Underlying("NVDA",217.77)
+            last_underlying_conid="4815747"
+            def get_historical_bars(self, symbol, period):
+                raise RuntimeError("secret-token=https://private.invalid/session/123")
+        provider=Provider()
+        with patch("options_scanner.scan_puts._ibkr_candidates",return_value=[]), self.assertLogs("options_scanner.scan_service",level="WARNING") as logs:
+            result=PutScanService().run(ScanRequest(),provider=provider,verbose=True)
+        self.assertEqual(result.candidates,())
+        self.assertEqual(result.underlying_price,217.77)
+        self.assertEqual(result.summary.historical_status,"error")
+        self.assertEqual(result.technical_context.bars,())
+        self.assertNotIn("secret-token"," ".join(logs.output))
+
+    def test_history_metrics_are_populated_without_candidates(self):
+        class Provider:
+            last_underlying=Underlying("NVDA",217.77)
+            last_underlying_conid="4815747"
+            last_historical_bars_received=2
+            def get_historical_bars(self, symbol, period):
+                from options_scanner.historical import HistoricalBar
+                return (HistoricalBar(date(2026,8,19),216,218,215,217),HistoricalBar(date(2026,8,20),217,219,216,218))
+        with patch("options_scanner.scan_puts._ibkr_candidates",return_value=[]):
+            result=PutScanService().run(ScanRequest(),provider=Provider())
+        self.assertEqual((result.summary.historical_request,result.summary.historical_bars_received,
+                          result.summary.historical_bars_valid,result.summary.historical_period,
+                          result.summary.historical_status),(1,2,2,"6m","ok"))
+        self.assertIn("historical_data",result.summary.phase_seconds)
+        self.assertIn("technical_analysis",result.summary.phase_seconds)

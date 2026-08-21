@@ -235,6 +235,8 @@ class IbkrMarketDataProvider:
         self._contract_cache_lock = threading.Lock()
         self.http_call_counts: Counter[str] = Counter()
         self.last_underlying: Underlying | None = None
+        self.last_underlying_conid: str | None = None
+        self.last_historical_bars_received = 0
 
     def _get(self, path: str, params: Mapping[str, str]) -> Any:
         """Count safe endpoint names while leaving request details private."""
@@ -251,8 +253,16 @@ class IbkrMarketDataProvider:
         self, symbol: str, period: HistoricalPeriod = HistoricalPeriod.SIX_MONTHS
     ) -> tuple[HistoricalBar, ...]:
         """Return provider-neutral daily bars using this provider's Gateway session."""
-        adapter = IbkrHistoricalDataProvider(self._transport, lambda value: self.locate_stock(value)[0])
-        return adapter.get_historical_bars(symbol, period)
+        # Reuse the exact stock contract resolved by the scan. Besides avoiding a
+        # redundant secdef request, this prevents an ambiguous symbol search from
+        # selecting a different listing for history.
+        adapter = IbkrHistoricalDataProvider(
+            self._transport,
+            lambda value: self.last_underlying_conid or self.locate_stock(value)[0],
+        )
+        bars = adapter.get_historical_bars(symbol, period)
+        self.last_historical_bars_received = adapter.last_bars_received
+        return bars
 
     def locate_stock(self, symbol: str) -> tuple[str, tuple[date, ...]]:
         data = self._get("/iserver/secdef/search", {"symbol": symbol.upper(), "secType": "STK"})
@@ -304,6 +314,7 @@ class IbkrMarketDataProvider:
         conid, months = self.locate_stock(symbol)
         underlying = self.get_underlying_by_conid(symbol, conid, deadline=deadline)
         self.last_underlying = underlying
+        self.last_underlying_conid = conid
         return underlying, conid, months
 
     def get_put_strikes(self, conid: str, expiration: date) -> tuple[float, ...]:

@@ -35,6 +35,9 @@ class HistoricalDataProvider(Protocol):
 def map_ibkr_historical_bars(payload: Any) -> tuple[HistoricalBar, ...]:
     """Map Client Portal history response into provider-neutral domain bars."""
     rows = payload.get("data", ()) if isinstance(payload, Mapping) else ()
+    # Some Gateway versions wrap the array once more in a ``data`` object.
+    if isinstance(rows, Mapping):
+        rows = rows.get("data", rows.get("bars", ()))
     result = []
     for row in rows if isinstance(rows, Sequence) else ():
         if not isinstance(row, Mapping):
@@ -56,6 +59,7 @@ class IbkrHistoricalDataProvider:
     def __init__(self, transport: object, conid_resolver=None) -> None:
         self._transport = transport
         self._resolver = conid_resolver
+        self.last_bars_received = 0
 
     def get_historical_bars(self, symbol: str, period: HistoricalPeriod = HistoricalPeriod.SIX_MONTHS) -> tuple[HistoricalBar, ...]:
         if self._resolver:
@@ -69,6 +73,10 @@ class IbkrHistoricalDataProvider:
         payload = self._transport.get("/iserver/marketdata/history", {
             "conid": str(conid), "period": period.value, "bar": "1d", "outsideRth": "true",
         })
+        rows = payload.get("data", ()) if isinstance(payload, Mapping) else ()
+        if isinstance(rows, Mapping):
+            rows = rows.get("data", rows.get("bars", ()))
+        self.last_bars_received = len(rows) if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes)) else 0
         return map_ibkr_historical_bars(payload)
 
 

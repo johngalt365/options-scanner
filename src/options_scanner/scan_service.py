@@ -6,6 +6,7 @@ from argparse import Namespace
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 import time
+import logging
 from typing import Callable
 
 from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
@@ -13,6 +14,8 @@ from options_scanner.market_data import FakeMarketDataProvider
 from options_scanner.scanner import PutScanCandidate, build_candidates, rank_candidates, scan_puts
 from options_scanner.historical import DemoHistoricalDataProvider, HistoricalPeriod
 from options_scanner.technical_context import TechnicalContext, build_technical_context
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +75,13 @@ class ScanMetrics:
     market_data_not_subscribed: int = 0
     market_data_unknown: int = 0
     phase_seconds: dict[str, float] = field(default_factory=dict)
+    historical_request: int = 0
+    historical_bars_received: int = 0
+    historical_bars_valid: int = 0
+    historical_period: str = "6m"
+    historical_status: str = "not_requested"
+    technical_supports: int = 0
+    technical_resistances: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +159,37 @@ class PutScanService:
         technical = None
         if price is not None:
             history_provider = DemoHistoricalDataProvider(as_of) if request.fake else real_provider
-            bars = history_provider.get_historical_bars(request.ticker, request.historical_period)
+            summary.historical_request = 1
+            summary.historical_period = request.historical_period.value
+            history_started = self._clock()
+            try:
+                bars = history_provider.get_historical_bars(request.ticker, request.historical_period)
+                summary.historical_bars_received = getattr(history_provider, "last_historical_bars_received", len(bars))
+                summary.historical_bars_valid = len(bars)
+                summary.historical_status = "ok" if bars else "empty"
+            except Exception as exc:
+                # History is supplementary. Never let its HTTP/parsing failure
+                # invalidate option results and never log request/session data.
+                bars = ()
+                summary.historical_status = "error"
+                logger.warning("Historical data unavailable (%s)", type(exc).__name__)
+            summary.phase_seconds["historical_data"] = max(0.0, self._clock() - history_started)
+            technical_started = self._clock()
             technical = build_technical_context(request.ticker, request.historical_period, bars, price,
                                                 (candidate.strike for candidate in ranked if candidate.complete))
+            summary.technical_supports = sum(1 for z in technical.zones if z.kind.value == "support" and not z.broken)
+            summary.technical_resistances = sum(1 for z in technical.zones if z.kind.value == "resistance" and not z.broken)
+            summary.phase_seconds["technical_analysis"] = max(0.0, self._clock() - technical_started)
+            if verbose:
+                logger.info(
+                    "historical/request=%d historical/bars_received=%d historical/bars_valid=%d "
+                    "historical/period=%s historical/status=%s technical/supports=%d "
+                    "technical/resistances=%d historical_data=%.3fs technical_analysis=%.3fs",
+                    summary.historical_request, summary.historical_bars_received,
+                    summary.historical_bars_valid, summary.historical_period,
+                    summary.historical_status, summary.technical_supports,
+                    summary.technical_resistances, summary.phase_seconds["historical_data"],
+                    summary.phase_seconds["technical_analysis"],
+                )
         return ScanResult(ranked, summary, max(0.0, self._clock() - started), incomplete,
                           price, market_status, datetime.now(timezone.utc), request.fake, technical)

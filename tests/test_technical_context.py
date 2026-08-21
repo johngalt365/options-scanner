@@ -28,6 +28,11 @@ class TechnicalTest(TestCase):
     def test_mapping_skips_malformed_rows(self):
         self.assertEqual(len(map_ibkr_historical_bars({"data":[{"bad":1},{"t":"2026-01-02","o":1,"h":2,"l":.5,"c":1}]})),1)
 
+    def test_mapping_accepts_real_gateway_nested_data_shape(self):
+        payload={"data":{"data":[{"t":1767225600000,"o":10.5,"h":12.0,"l":9.0,"c":11.25,"v":1234}]}}
+        mapped=map_ibkr_historical_bars(payload)
+        self.assertEqual((mapped[0].session.isoformat(),mapped[0].close,mapped[0].volume),("2026-01-01",11.25,1234))
+
     def test_pivot_high_and_low_and_insufficient(self):
         found=detect_pivots(bars((10,9,8,9,12,9,8)),window=1)
         self.assertIn(PivotType.LOW,{p.kind for p in found}); self.assertIn(PivotType.HIGH,{p.kind for p in found})
@@ -73,3 +78,16 @@ class TechnicalTest(TestCase):
         page=render_page(result=result).decode()
         for text in ('value="3m"','value="6m" selected','value="1y"','<svg role="img"','Contexto técnico','Última sesión disponible','no garantizan reacciones futuras','Frozen'):
             self.assertIn(text,page)
+        self.assertIn('<details id="technical-x">',page)
+        self.assertNotIn('<details id="technical-x" open',page)
+        self.assertIn('data-period="3m"',page); self.assertIn('data-period="6m"',page); self.assertIn('data-period="1y"',page)
+        self.assertIn("event.target.closest('.period-button')",page)
+
+    def test_frozen_without_history_shows_safe_visible_fallback(self):
+        context=build_technical_context("X",HistoricalPeriod.SIX_MONTHS,(),105)
+        result=ScanResult((),ScanMetrics(historical_status="empty"),.1,underlying_price=105,
+                          market_data_status="Frozen",technical_context=context)
+        page=render_page(result=result).decode()
+        self.assertIn("Contexto técnico",page); self.assertIn("Histórico no disponible",page)
+        self.assertIn("El scan de opciones no se ha visto afectado",page)
+        self.assertIn("Frozen",page)
