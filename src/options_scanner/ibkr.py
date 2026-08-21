@@ -279,6 +279,15 @@ class IbkrMarketDataProvider:
         data = self._get("/iserver/secdef/search", {"symbol": symbol.upper(), "secType": "STK"})
         rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else []
         row = next((item for item in rows if isinstance(item, Mapping) and str(item.get("symbol", "")).upper() == symbol.upper()), None)
+        if row is None:
+            # Some Gateway versions expose exchange-traded funds as ETF rather
+            # than STK. This only broadens underlying discovery; option contract
+            # identity below remains strictly validated as OPT/right=P.
+            data = self._get("/iserver/secdef/search", {"symbol": symbol.upper(), "secType": "ETF"})
+            rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else []
+            row = next((item for item in rows if isinstance(item, Mapping)
+                        and str(item.get("symbol", "")).upper() == symbol.upper()
+                        and str(item.get("secType", "ETF")).upper() in ("ETF", "STK")), None)
         if row is None or row.get("conid") is None:
             raise TickerNotFoundError(f"ticker no encontrado: {symbol.upper()}")
         self._searched_underlyings.add(str(row["conid"]))
