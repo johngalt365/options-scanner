@@ -198,6 +198,26 @@ class WebTest(TestCase):
                      "max_abs_delta", "historical_period", "fake"):
             self.assertIn(f'name="{name}"', page)
 
+    def test_filter_panel_groups_controls_aligns_labels_and_exposes_help(self):
+        page = render_page().decode()
+
+        for group in ("Universo", "Contrato", "Short PUT", "Contexto técnico"):
+            self.assertIn(f"<legend>{group}</legend>", page)
+        self.assertIn('class="control-label">Distancia mínima<br>al strike (%)', page)
+        self.assertIn('class="control-label">Theta short<br>mínimo', page)
+        for help_text in (
+            "Días hasta vencimiento",
+            "Distancia porcentual entre underlying y strike",
+            "Se filtra por valor absoluto de delta",
+            "Volatilidad implícita contractual mínima",
+            "Exposición temporal favorable mínima para la posición corta",
+        ):
+            self.assertIn(f'title="{help_text}"', page)
+        self.assertIn('class="form-actions"', page)
+        self.assertIn('.control-label{display:flex;min-height:2.1em;align-items:flex-end', page)
+        self.assertIn('@media(max-width:1100px)', page)
+        self.assertIn('@media(max-width:430px)', page)
+
     def test_watchlist_crud_selection_validation_and_user_isolation(self):
         store = UserWorkspaceStore()
         service = StubService()
