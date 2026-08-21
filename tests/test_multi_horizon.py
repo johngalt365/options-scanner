@@ -2,7 +2,8 @@ from datetime import date
 
 from options_scanner.historical import HistoricalPeriod
 from options_scanner.technical_analysis import PriceZone, ZoneType
-from options_scanner.technical_context import TechnicalContext, find_confluences
+from options_scanner.technical_context import (ConfluenceOrigin, TechnicalConfluence, TechnicalContext,
+                                               classify_strike_against_confluences, find_confluences)
 
 
 def zone(lo, hi, kind=ZoneType.SUPPORT, broken=False, strength="media"):
@@ -55,3 +56,31 @@ def test_one_horizon_without_history_still_allows_two_of_three():
     contexts=(context(P[0],[zone(78,84)]),context(P[1],[]),context(P[2],[zone(80,86)]))
     result=find_confluences(contexts,100)
     assert len(result)==1 and len(result[0].periods)==2
+
+
+def test_relevant_support_confluence_classifies_strike_and_uses_nearest_edge():
+    lower = TechnicalConfluence(50, 55, ZoneType.SUPPORT,
+        (ConfluenceOrigin(P[0], zone(48, 55)), ConfluenceOrigin(P[1], zone(50, 57))), 0)
+    relevant = TechnicalConfluence(70.73, 79.67, ZoneType.SUPPORT,
+        tuple(ConfluenceOrigin(p, zone(70.73, 79.67)) for p in P), 0)
+
+    inside = classify_strike_against_confluences(75, (lower, relevant))
+    above = classify_strike_against_confluences(80, (lower, relevant))
+    below = classify_strike_against_confluences(69, (lower, relevant))
+
+    assert inside.confluence is relevant and inside.position_label == "Dentro de confluencia"
+    assert above.confluence is relevant and above.position_label == "Sobre confluencia"
+    assert round(above.distance_percent, 2) == 0.41
+    assert below.confluence is relevant and below.position_label == "Bajo confluencia"
+
+
+def test_confluence_context_preserves_two_and_three_horizons_and_empty_state():
+    pair = TechnicalConfluence(70, 75, ZoneType.SUPPORT,
+        (ConfluenceOrigin(P[0], zone(70, 76)), ConfluenceOrigin(P[2], zone(69, 75))), 0)
+    triple = TechnicalConfluence(80, 85, ZoneType.SUPPORT,
+        tuple(ConfluenceOrigin(p, zone(80, 85)) for p in P), 0)
+
+    assert len(classify_strike_against_confluences(72, (pair, triple)).confluence.origins) == 2
+    assert len(classify_strike_against_confluences(82, (pair, triple)).confluence.origins) == 3
+    missing = classify_strike_against_confluences(75, ())
+    assert missing.confluence is None and missing.position_label == "Sin confluencia relevante"

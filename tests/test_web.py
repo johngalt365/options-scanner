@@ -4,7 +4,7 @@ from unittest import TestCase
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import DiscardedContract, ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
-from options_scanner.web import (_interpretation, _multi_screener, _rows, create_app, ibkr_connection_status, parse_tickers,
+from options_scanner.web import (_directional_distance, _interpretation, _multi_screener, _rows, create_app, ibkr_connection_status, parse_tickers,
                                  render_page, render_technical_screener, resolve_universe)
 from options_scanner.historical import HistoricalBar
 from datetime import timedelta
@@ -211,6 +211,20 @@ class WebTest(TestCase):
         self.assertIn(".lazy-chart", page)
         self.assertNotIn('<svg role="img"', page)
         self.assertIn("addEventListener('toggle'", page)
+        self.assertEqual(page.count('class="detail-trigger chevron"'), 2)
+        self.assertIn('aria-label="Ver detalle de NVDA"', page)
+
+    def test_zone_distances_are_directional_and_legacy_modes_keep_columns(self):
+        support = PriceZone(70, 80, 75, ZoneType.SUPPORT, 2, date(2026, 8, 1), 70, "media")
+        resistance = PriceZone(130, 150, 140, ZoneType.RESISTANCE, 2, date(2026, 8, 1), 130, "media")
+        context = TechnicalContext("XYZ", HistoricalPeriod.SIX_MONTHS, (), 100,
+            (support, resistance), (support,), (resistance,), support, resistance, 25, 40, ())
+        result = ScanResult((), ScanMetrics(historical_period="6m"), .1,
+                            underlying_price=100, technical_context=context)
+        self.assertEqual(_directional_distance(-25, "support"), "25.00% por debajo del precio")
+        self.assertEqual(_directional_distance(40, "resistance"), "40.00% por encima del precio")
+        for heading in ("S1", "Distancia S1", "Fuerza S1"):
+            self.assertIn(heading, _multi_screener((("XYZ", result, None),)))
 
     def test_compact_header_keeps_watchlist_selector_and_financial_filters(self):
         page = render_page(watchlists={
