@@ -107,7 +107,7 @@ class MarketData:
     gamma: float
     theta: float
     vega: float
-    implied_volatility: float
+    implied_volatility: float | None
     volume: int
     open_interest: int
     # Raw IBKR 6509 value when supplied.  It is intentionally preserved so
@@ -119,7 +119,7 @@ class MarketData:
             raise ValueError("bid/ask no forman un mercado válido")
         if not -1 <= self.delta <= 1:
             raise ValueError("delta debe estar entre -1 y 1")
-        if self.implied_volatility < 0 or self.volume < 0 or self.open_interest < 0:
+        if (self.implied_volatility is not None and self.implied_volatility < 0) or self.volume < 0 or self.open_interest < 0:
             raise ValueError("IV, volumen y open interest no pueden ser negativos")
 
 

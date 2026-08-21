@@ -205,7 +205,7 @@ def _rows(result: ScanResult | None) -> str:
     if result is None:
         return ""
     if not result.candidates:
-        return '<tr><td colspan="19" class="empty">No hay candidatos completos para estos filtros.</td></tr>'
+        return '<tr><td colspan="21" class="empty">No hay candidatos completos para estos filtros.</td></tr>'
     rendered = []
     for c in result.candidates:
         availability = escape(str(c.market_data_availability))
@@ -215,7 +215,8 @@ def _rows(result: ScanResult | None) -> str:
             _number(c.ticker), _number(c.expiration.isoformat()), _number(c.dte), _number(c.strike, 4),
             f"${c.underlying_price:,.2f}", _percent(c.safety_margin), _number(c.bid, 4),
             _number(c.ask, 4), _number(c.mid, 4), _number(c.delta, 4), _number(c.gamma, 4),
-            _number(c.theta, 4), _number(c.vega, 4), _percent(c.implied_volatility),
+            _number(c.contract_theta, 4), _number(c.short_theta, 4), _number(c.theta_decay_pct_per_day, 2),
+            _number(c.vega, 4), _percent(c.implied_volatility),
             _number(c.open_interest), availability, _percent(c.premium_yield),
             _percent(c.annualized_premium_yield),
             _candidate_technical_context(c),
@@ -231,7 +232,7 @@ def _summary(result: ScanResult | None) -> str:
     phase = s.phase_seconds
     items = (
         ("Considerados (evaluados con market data/filtros)", s.considered), ("Completos", s.complete),
-        ("Rechazados por margen", s.rejected_margin), ("Rechazados por delta", s.rejected_delta),
+        ("Rechazados por distancia al strike", s.rejected_margin), ("Rechazados por delta", s.rejected_delta),
         ("Tiempo total", f"{result.elapsed_seconds:.3f} s"),
     )
     technical = (
@@ -304,7 +305,7 @@ def _interpretation(result: ScanResult | None) -> str:
 
     reasons = (
         (summary.rejected_delta, "contratos quedaron fuera del rango de delta configurado."),
-        (summary.rejected_margin, "contratos fueron descartados por no alcanzar el margen de seguridad mínimo."),
+        (summary.rejected_margin, "contratos fueron descartados por no alcanzar la distancia mínima al strike."),
         (summary.incomplete, "contratos no pudieron evaluarse completamente por falta de bid, ask o delta."),
     )
     reason_messages = [f"{count} {message}" for count, message in reasons if count]
@@ -313,7 +314,7 @@ def _interpretation(result: ScanResult | None) -> str:
         messages.extend(("neutral", message) for message in reason_messages[:available_slots])
         messages.append((
             "neutral",
-            "Puedes revisar los filtros de delta, DTE o margen de seguridad si quieres ampliar el universo analizado.",
+            "Puedes revisar los filtros de delta, DTE o distancia al strike si quieres ampliar el universo analizado.",
         ))
     details.extend(reason_messages)
     if summary.timed_out:
@@ -333,7 +334,7 @@ def _interpretation(result: ScanResult | None) -> str:
     if not analysis:
         analysis = "<li>No se registraron descartes ni contratos pendientes.</li>"
     discarded = (
-        ("Margen", summary.rejected_margin), ("Delta", summary.rejected_delta),
+        ("Distancia al strike", summary.rejected_margin), ("Delta", summary.rejected_delta),
         ("Datos incompletos", summary.incomplete),
         ("Timeout", summary.unresolved_contracts_timeout),
     )
@@ -463,8 +464,8 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
     rows = []
     with_candidates = errors = 0
     elapsed = 0.0
-    sortable = {0: "text", 1: "number", 4: "number", 6: "number", 7: "number",
-                8: "number", 9: "number", 10: "number", 11: "number", 13: "number"}
+    sortable = {0: "text", 1: "number", 4: "number", 6: "number", 7: "number", 8: "number", 9: "number", 10: "number",
+                11: "number", 12: "number", 13: "number", 14: "number", 15: "number", 16: "number"}
     def badge(state: str | None) -> str:
         value = state or "N/D"
         lowered = value.lower()
@@ -474,7 +475,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
     for ticker, result, item_error in items:
         if result is None:
             errors += 1
-            cells = ((ticker, ticker), ("N/D", ""), (badge(None), "")) + tuple(("N/D", "") for _ in range(13))
+            cells = ((ticker, ticker), ("N/D", ""), (badge(None), "")) + tuple(("N/D", "") for _ in range(15))
             detail = f'<div class="row-error" role="status">{escape(item_error or "No se pudo completar este ticker.")}</div>'
             row_class = "error-result"
         else:
@@ -493,22 +494,21 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                 (support.strength.capitalize() if support else "N/D", support.strength if support else ""),
                 (str(len(result.candidates)), len(result.candidates)),
                 (f"${best.strike:.2f}" if best else "N/D", best.strike if best else ""),
+                (str(best.dte) if best else "N/D", best.dte if best else ""),
                 (_percent(best.safety_margin) if best else "N/D", best.safety_margin if best else ""),
                 (f"{abs(best.delta):.4f}" if best and best.delta is not None else "N/D", abs(best.delta) if best and best.delta is not None else ""),
+                (_number(best.short_theta, 4) if best else "N/D", best.short_theta if best else ""),
+                (_number(best.theta_decay_pct_per_day, 2) if best else "N/D", best.theta_decay_pct_per_day if best else ""),
+                (_percent(best.implied_volatility) if best else "N/D", best.implied_volatility if best else ""),
                 (f"{best.premium_yield*100:.2f} %" if best and best.premium_yield is not None else "N/D", best.premium_yield if best and best.premium_yield is not None else ""),
                 (f"{best.annualized_premium_yield*100:.2f} %" if best and best.annualized_premium_yield is not None else "N/D", best.annualized_premium_yield if best and best.annualized_premium_yield is not None else ""),
+                (_number(best.open_interest) if best else "N/D", best.open_interest if best else ""),
                 (_strike_context_label(best) if best else "N/D", _strike_context_label(best) if best else ""),
-                (f"{best.distance_to_support_pct:+.2f} %" if best and best.distance_to_support_pct is not None else "N/D", best.distance_to_support_pct if best and best.distance_to_support_pct is not None else ""),
-                ((best.support_strength or best.nearest_support_below.strength).capitalize()
-                 if best and best.nearest_support_below else "N/D",
-                 (best.support_strength or best.nearest_support_below.strength) if best and best.nearest_support_below else ""),
-                (str(best.nearest_support_below.contacts) if best and best.nearest_support_below and best.nearest_support_below.contacts is not None else "N/D",
-                 best.nearest_support_below.contacts if best and best.nearest_support_below and best.nearest_support_below.contacts is not None else ""),
             )
             detail = (_result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
                       (f'<p class="strike-explanation">{escape(_strike_support_explanation(best))}</p>' if best else '') +
                       '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
-                      ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico')) +
+                      ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico')) +
                       f'</tr></thead><tbody>{_rows(result)}</tbody></table></div>{_summary(result)}')
             relation_class = ({StrikePosition.ABOVE_SUPPORT: " strike-above",
                                StrikePosition.INSIDE_SUPPORT: " strike-inside",
@@ -518,8 +518,8 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
         rendered = ''.join(f'<td data-sort-value="{escape(str(sort_value if sort_value is not None else ""))}">{value}</td>' for value, sort_value in cells)
         rows.append(f'<tr data-ticker="{escape(ticker)}" class="{row_class}">{rendered}<td><details class="ticker-detail"><summary>Ver detalle</summary><div class="detail-panel"><button type="button" class="detail-close" aria-label="Cerrar detalle">Cerrar</button>{detail}</div></details></td></tr>')
     headings = ('Ticker','Precio','Estado','S1','Distancia S1','Fuerza S1','Candidatos',
-                'Mejor strike','Safety margin','Delta','Premium yield','Annualized yield',
-                'Contexto strike','Distancia strike–soporte','Fuerza zona','Contactos')
+                'Strike','DTE','Distancia al strike','Delta','Theta short','Theta %/día','IV',
+                'Premium yield','Annualized yield','Open interest','Contexto técnico del strike')
     headers = []
     for i, heading in enumerate(headings):
         content = heading
@@ -547,7 +547,7 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
                 watchlist_message: str | None = None) -> bytes:
     v = {"ticker": "NVDA", "min_dte": "30", "max_dte": "45", "min_safety_margin": "20",
          "min_abs_delta": "0.15", "max_abs_delta": "0.30", "mode": "fake", "historical_period":"6m",
-         "universe_source": "manual"}
+         "universe_source": "manual", "min_iv": "", "min_short_theta": ""}
     if values:
         v.update(values)
     checked = " checked" if v["mode"] == "fake" else ""
@@ -568,7 +568,7 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
         <button name="action" value="watchlist_delete" type="submit" class="danger">Eliminar</button></form>'''
         for item in (watchlists or {}).values()
     )
-    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
+    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
     html = f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Options Scanner</title><style>
 body{{font:15px system-ui;margin:0;background:#f4f6fa;color:#182033}}main{{max-width:1500px;margin:auto;padding:2rem}}h1{{margin:0}}.note{{color:#556}}.top{{display:flex;justify-content:space-between;gap:1rem;align-items:start}}.connection{{background:white;padding:.7rem;border-radius:8px;min-width:220px}}.dot{{display:inline-block;width:.75rem;height:.75rem;border-radius:50%;background:#818895;margin-right:.4rem}}.connected .dot{{background:#198754}}.login .dot{{background:#e58a00}}.disconnected .dot{{background:#c52d36}}.demo .dot{{background:#818895}}.connection button{{font-size:.8rem;padding:.35rem .6rem;margin-top:.4rem}}.connection small{{display:block;color:#596273;margin-top:.25rem}}
 form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padding:1.25rem;border-radius:10px;box-shadow:0 2px 8px #0001}}label{{display:grid;gap:.35rem;font-weight:600}}input{{padding:.55rem;border:1px solid #aab3c5;border-radius:5px;width:9rem}}button{{background:#2358d5;color:white;border:0;border-radius:5px;padding:.7rem 1.4rem;font-weight:700;cursor:pointer}}button:disabled{{cursor:not-allowed;opacity:.65}}button.danger{{background:#a52832}}.mode{{display:flex;align-items:center;gap:.4rem}}.mode input{{width:auto}}.watchlists{{background:white;padding:1rem;border-radius:10px}}.watchlist-row{{box-shadow:none;border-top:1px solid #dde2ea;border-radius:0;padding:.8rem 0}}.watchlist-row input[name="watchlist_tickers"]{{width:20rem}}
@@ -578,10 +578,10 @@ form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padd
 .scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.scan-legend{{font-size:.8rem;color:#596273}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error,.row-error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.screener table{{font-size:.86rem}}.ticker-detail{{margin:0;text-align:left}}.detail-panel{{position:fixed;inset:5%;z-index:3;background:#f4f6fa;padding:1.2rem;box-shadow:0 8px 40px #0005;overflow:auto;white-space:normal}}.candidate-table{{font-size:.82rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
 /* Compact screener overrides */
 main{{max-width:1700px;padding:1rem}}h1{{font-size:1.45rem}}form#scan-form{{gap:.45rem .7rem;padding:.65rem}}form#scan-form label{{font-size:.78rem;gap:.15rem}}form#scan-form input,form#scan-form select{{padding:.4rem;width:7rem}}form#scan-form input[name="ticker"]{{width:14rem}}form#scan-form select[name="universe_source"]{{width:12rem}}.watchlists{{padding:.55rem .7rem}}.watchlists>h2,.watchlists>p{{display:none}}section{{margin-top:.8rem}}.screener h2{{font-size:1.15rem;margin:.2rem 0}}.scan-summary{{display:inline-block;background:#e8eef8;padding:.38rem .65rem;border-radius:5px;font-weight:700}}.quick-filters{{display:flex;gap:.35rem;margin:.5rem 0}}.quick-filters button{{background:#e4e9f1;color:#263451;padding:.35rem .65rem}}.quick-filters button.active{{background:#2358d5;color:white}}.sort-button{{padding:0;background:transparent;color:inherit;white-space:nowrap}}.screener th,.screener td{{padding:.45rem .5rem}}.screener th{{position:sticky;top:0}}.ticker-detail>summary{{color:#2358d5;list-style:none;white-space:nowrap}}.detail-close{{float:right;background:#566174}}.status-badge{{display:inline-block;padding:.12rem .4rem;border-radius:999px;font-size:.72rem;font-weight:800}}.status-badge.frozen{{background:#fff0b8;color:#684d00}}.status-badge.delayed{{background:#e8e0ff;color:#51359a}}.status-badge.realtime{{background:#dff4e8;color:#12643e}}.status-badge.na{{background:#e8ebef;color:#596273}}@media(max-width:800px){{main{{padding:.5rem}}.top{{display:block}}.connection{{margin:.5rem 0}}}}
-</style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading. <a href="/technical-check">Validación multi-ticker</a></p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div>{notice}<form method="post" id="scan-form">
+</style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="strategy"><strong>Estrategia: Venta de PUT</strong></p><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading. <a href="/technical-check">Validación multi-ticker</a></p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div>{notice}<aside class="interpretation"><p>En una Short PUT, theta positivo para la posición corta representa deterioro temporal teórico favorable, manteniendo constantes las demás variables.</p><p>Una IV elevada puede aumentar la prima, pero también suele reflejar mayor incertidumbre esperada.</p><p class="note">Theta %/día es una aproximación teórica de erosión temporal relativa a la prima, no una rentabilidad diaria garantizada.</p></aside><form method="post" id="scan-form">
 <label>Universo<select name="universe_source">{universe_options}</select></label><label>Tickers manuales<input name="ticker" value="{escape(v['ticker'])}" placeholder="NVDA, AAPL SPY" aria-describedby="ticker-help"><small id="ticker-help">Separados por comas o espacios</small></label><label>Min DTE<input type="number" name="min_dte" min="0" value="{escape(v['min_dte'])}" required></label><label>Max DTE<input type="number" name="max_dte" min="0" value="{escape(v['max_dte'])}" required></label>
-<label>Margen mínimo (%)<input type="number" name="min_safety_margin" min="0" max="100" step="0.01" value="{escape(v['min_safety_margin'])}" required></label><label>|Delta| mínima<input type="number" name="min_abs_delta" min="0" max="1" step="0.01" value="{escape(v['min_abs_delta'])}" required></label><label>|Delta| máxima<input type="number" name="max_abs_delta" min="0" max="1" step="0.01" value="{escape(v['max_abs_delta'])}" required></label>
-<label>Histórico<select name="historical_period"><option value="3m"{' selected' if v['historical_period']=='3m' else ''}>3M</option><option value="6m"{' selected' if v['historical_period']=='6m' else ''}>6M</option><option value="1y"{' selected' if v['historical_period']=='1y' else ''}>1A</option></select></label>
+<label>Distancia mínima al strike (%)<input type="number" name="min_safety_margin" min="0" max="100" step="0.01" value="{escape(v['min_safety_margin'])}" required></label><label>|Delta| mínima<input type="number" name="min_abs_delta" min="0" max="1" step="0.01" value="{escape(v['min_abs_delta'])}" required></label><label>|Delta| máxima<input type="number" name="max_abs_delta" min="0" max="1" step="0.01" value="{escape(v['max_abs_delta'])}" required></label>
+<label>IV mínima (%)<input type="number" name="min_iv" min="0" step="0.01" value="{escape(v['min_iv'])}" placeholder="Desactivada"></label><label>Theta short mínimo<input type="number" name="min_short_theta" min="0" step="0.0001" value="{escape(v['min_short_theta'])}" placeholder="Desactivado"></label><label>Histórico<select name="historical_period"><option value="3m"{' selected' if v['historical_period']=='3m' else ''}>3M</option><option value="6m"{' selected' if v['historical_period']=='6m' else ''}>6M</option><option value="1y"{' selected' if v['historical_period']=='1y' else ''}>1A</option></select></label>
 <label class="mode"><input id="fake-mode" type="checkbox" name="fake" value="1"{checked}> Modo demostración</label><button id="scan-button" type="submit">Scan</button><button name="action" value="watchlist_from_manual" type="submit">Guardar entrada como lista</button></form><p id="demo-label" class="demo-label"{' hidden' if not checked else ''}>Datos simulados — no proceden de Interactive Brokers</p>
 <section class="watchlists"><h2>Watchlists</h2><p class="note">Estas listas se guardan solo en memoria y se perderán al reiniciar la aplicación.</p><button type="button" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">Nueva lista</button><form method="post" class="watchlist-row" hidden><label>Nombre<input name="watchlist_name" required></label><label>Tickers separados por coma o espacios<input name="watchlist_tickers" placeholder="NVDA, AAPL SPY" required></label><button name="action" value="watchlist_create" type="submit">Crear lista</button></form>{watchlist_rows}</section>
 <div id="scan-status" class="scan-status" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><div><strong id="scan-title"></strong><span id="scan-source"></span><span>Tiempo transcurrido: <b id="scan-timer">00:00</b></span><span class="scan-legend">Estados: Pendiente / Analizando / Completado / Parcial / Error</span></div></div><div id="scan-output" aria-live="polite">{alert}{table}{_summary(result)}</div><script>
@@ -704,6 +704,8 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                     min_safety_margin=float(values.get("min_safety_margin", "")) / 100,
                     min_abs_delta=float(values.get("min_abs_delta", "")),
                     max_abs_delta=float(values.get("max_abs_delta", "")), fake=values["mode"] == "fake",
+                    min_iv=(float(values["min_iv"]) / 100 if values.get("min_iv", "").strip() else None),
+                    min_short_theta=(float(values["min_short_theta"]) if values.get("min_short_theta", "").strip() else None),
                     historical_period=HistoricalPeriod(values.get("historical_period", "6m")),
                 )
                 if len(tickers) == 1:

@@ -151,8 +151,8 @@ class WebTest(TestCase):
             self.assertIn(label, page)
         for label in ("Strike sobre soporte", "Strike dentro soporte", "Strike bajo soporte"):
             self.assertIn(label, page)
-        for heading in ("Safety margin", "Delta", "Premium yield", "Annualized yield",
-                        "Distancia strike–soporte"):
+        for heading in ("Distancia al strike", "Delta", "Theta short", "Theta %/día", "IV",
+                        "Premium yield", "Annualized yield", "Open interest"):
             self.assertRegex(page, rf'class="sort-button"[^>]*>{heading}')
         self.assertIn("Strike $95.00 situado por encima de S1 ($70.73–$91.04). S1 fuerte, 3 contactos.", page)
         self.assertNotIn("recomend", page.lower())
@@ -513,11 +513,11 @@ class WebTest(TestCase):
     def test_interpretation_explains_zero_candidates_rejected_by_delta(self):
         block = self.interpretation(rejected_delta=29)
         self.assertIn("29 contratos quedaron fuera del rango de delta configurado.", block)
-        self.assertIn("Puedes revisar los filtros de delta, DTE o margen", block)
+        self.assertIn("Puedes revisar los filtros de delta, DTE o distancia al strike", block)
 
     def test_interpretation_explains_zero_candidates_rejected_by_margin(self):
         block = self.interpretation(rejected_margin=202)
-        self.assertIn("202 contratos fueron descartados por no alcanzar el margen", block)
+        self.assertIn("202 contratos fueron descartados por no alcanzar la distancia mínima al strike", block)
 
     def test_interpretation_explains_incomplete_contracts(self):
         block = self.interpretation(incomplete=7)
@@ -555,7 +555,7 @@ class WebTest(TestCase):
         )
         self.assertIn("Ver detalles del análisis", block)
         self.assertIn("Contratos descartados", block)
-        for label, count in (("Margen", 202), ("Delta", 29), ("Datos incompletos", 7), ("Timeout", 11)):
+        for label, count in (("Distancia al strike", 202), ("Delta", 29), ("Datos incompletos", 7), ("Timeout", 11)):
             self.assertIn(f"<dt>{label}</dt><dd>{count}</dd>", block)
 
     def test_interpretation_and_heading_sanitize_market_status(self):

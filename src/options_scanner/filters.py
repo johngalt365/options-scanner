@@ -22,6 +22,8 @@ def filter_put_candidates(
     min_safety_margin: float = 0.20,
     min_abs_delta: float = 0.15,
     max_abs_delta: float = 0.30,
+    min_iv: float | None = None,
+    min_short_theta: float | None = None,
 ) -> list[MarketData]:
     """Selecciona cotizaciones PUT que cumplen todas las reglas."""
 
@@ -38,6 +40,8 @@ def filter_put_candidates(
             and min_dte <= contract.days_to_expiration(as_of) <= max_dte
             and safety_margin(underlying.current_price, contract.strike) >= min_safety_margin
             and min_abs_delta <= abs(quote.delta) <= max_abs_delta
+            and (min_iv is None or (quote.implied_volatility is not None and quote.implied_volatility >= min_iv))
+            and (min_short_theta is None or (quote.theta is not None and -quote.theta >= min_short_theta))
         ):
             candidates.append(quote)
     return candidates
