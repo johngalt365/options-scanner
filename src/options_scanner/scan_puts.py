@@ -53,6 +53,9 @@ class ScanSummary:
     incomplete: int = 0
     rejected_margin: int = 0
     rejected_delta: int = 0
+    rejected_dte: int = 0
+    rejected_iv: int = 0
+    rejected_theta: int = 0
     timed_out: bool = False
     timeout_phase: str | None = None
     target_contracts: int = 0
@@ -79,6 +82,7 @@ class ScanSummary:
     market_data_not_subscribed: int = 0
     market_data_unknown: int = 0
     phase_seconds: dict[str, float] = field(default_factory=dict)
+    discarded_contracts: list[object] = field(default_factory=list)
 
 
 def _ibkr_candidates(
@@ -135,6 +139,15 @@ def _ibkr_candidates(
             if safety_margin(underlying.current_price, strike) >= args.min_safety_margin
         ), key=lambda strike: (abs(safety_margin(underlying.current_price, strike) - args.min_safety_margin), strike)))
         stats.rejected_margin += len(all_strikes) - len(strikes)
+        if len(all_strikes) != len(strikes):
+            from options_scanner.scan_service import DiscardedContract
+            for strike in all_strikes:
+                margin = safety_margin(underlying.current_price, strike)
+                if margin < args.min_safety_margin:
+                    stats.discarded_contracts.append(DiscardedContract(
+                        args.ticker.upper(), None, strike,
+                        (f"Distancia {margin * 100:.4f}% < mínimo {args.min_safety_margin * 100:.4f}%",),
+                    ))
         finish_phase("dte_margin_filter", phase_started)
         phase_started = clock()
         resolution_progress = (
@@ -152,6 +165,14 @@ def _ibkr_candidates(
             expiration = provider.contract_expiration(contract)
             if args.min_dte <= (expiration - today).days <= args.max_dte:
                 confirmed.append((contract.conid, contract.strike, expiration))
+            else:
+                from options_scanner.scan_service import DiscardedContract
+                dte = (expiration - today).days
+                stats.rejected_dte += 1
+                stats.discarded_contracts.append(DiscardedContract(
+                    args.ticker.upper(), expiration, contract.strike,
+                    (f"DTE {dte} fuera de {args.min_dte}–{args.max_dte}",),
+                ))
         deadline_reached = clock() >= discovery_deadline
         if resolution_accounting:
             account = resolution_accounting[0]
@@ -243,19 +264,52 @@ def _ibkr_candidates(
             quote.bid, quote.ask, quote.delta, quote.gamma, quote.theta, quote.vega,
             quote.implied_volatility, quote.open_interest, quote.market_data_availability.display,
         )
+        reasons = []
+        missing = []
         if quote.delta is None:
-            stats.incomplete += 1
-            result.append(candidate)
+            missing.append("Delta")
         elif not args.min_abs_delta <= abs(quote.delta) <= args.max_abs_delta:
             stats.rejected_delta += 1
-        elif getattr(args, "min_iv", None) is not None and (
+            reasons.append(
+                f"|Delta| {abs(quote.delta):.6f} fuera de {args.min_abs_delta:.6f}–{args.max_abs_delta:.6f}"
+            )
+        if getattr(args, "min_iv", None) is not None:
+            if quote.implied_volatility is None:
+                missing.append("IV")
+            elif quote.implied_volatility < args.min_iv:
+                stats.rejected_iv += 1
+                reasons.append(f"IV {quote.implied_volatility * 100:.4f}% < mínimo {args.min_iv * 100:.4f}%")
+        if getattr(args, "min_short_theta", None) is not None:
+            if candidate.short_theta is None:
+                missing.append("Theta short")
+            elif candidate.short_theta < args.min_short_theta:
+                stats.rejected_theta += 1
+                reasons.append(f"Theta short {candidate.short_theta:.6f} < mínimo {args.min_short_theta:.6f}")
+        if not has_book:
+            missing.append("bid/ask")
+        if missing:
+            reasons.append(f"Market data incompleta/no disponible: {', '.join(missing)} N/D")
+        if reasons:
+            from options_scanner.scan_service import DiscardedContract
+            stats.discarded_contracts.append(DiscardedContract(
+                args.ticker.upper(), expiration, quote.strike, tuple(reasons)
+            ))
+        # Preserve the scanner's established precedence and result set while
+        # collecting every locally available explanation above.
+        delta_rejected = quote.delta is not None and not (
+            args.min_abs_delta <= abs(quote.delta) <= args.max_abs_delta
+        )
+        iv_rejected = getattr(args, "min_iv", None) is not None and (
             quote.implied_volatility is None or quote.implied_volatility < args.min_iv
-        ):
-            continue
-        elif getattr(args, "min_short_theta", None) is not None and (
+        )
+        theta_rejected = getattr(args, "min_short_theta", None) is not None and (
             candidate.short_theta is None or candidate.short_theta < args.min_short_theta
-        ):
+        )
+        if quote.delta is not None and (delta_rejected or iv_rejected or theta_rejected):
             continue
+        if missing:
+            stats.incomplete += 1
+            result.append(candidate)
         else:
             result.append(candidate)
             if candidate.complete:
@@ -263,7 +317,7 @@ def _ibkr_candidates(
             else:
                 stats.incomplete += 1
     # A global timeout can leave whole batches without even a placeholder row.
-    stats.incomplete += max(0, stats.considered - stats.complete - stats.incomplete - stats.rejected_delta)
+    stats.incomplete += max(0, stats.considered - len(quotes))
     finish_phase("filtering_ranking", phase_started)
     return result
 

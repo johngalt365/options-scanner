@@ -2,7 +2,7 @@ from io import BytesIO
 from unittest import TestCase
 
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
-from options_scanner.scan_service import ScanMetrics, ScanResult
+from options_scanner.scan_service import DiscardedContract, ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
 from options_scanner.web import (_interpretation, _multi_screener, _rows, create_app, ibkr_connection_status, parse_tickers,
                                  render_page, render_technical_screener, resolve_universe)
@@ -205,12 +205,15 @@ class WebTest(TestCase):
             self.assertIn(f"<legend>{group}</legend>", page)
         self.assertIn('class="control-label">Distancia mínima<br>al strike (%)', page)
         self.assertIn('class="control-label">Theta short<br>mínimo', page)
-        self.assertEqual(page.count('class="help-trigger"'), 7)
-        self.assertEqual(page.count('role="tooltip"'), 7)
+        self.assertEqual(page.count('class="help-trigger"'), 8)
+        self.assertEqual(page.count('role="tooltip"'), 8)
         for help_id in ("help-min-dte", "help-max-dte", "help-distance", "help-min-delta",
                         "help-max-delta", "help-iv", "help-theta"):
             self.assertIn(f'aria-describedby="{help_id}"', page)
             self.assertIn(f'id="{help_id}" role="tooltip"', page)
+        self.assertIn('id="help-history" role="tooltip"', page)
+        self.assertIn("Ventana histórica utilizada para calcular soportes y resistencias del underlying.", page)
+        self.assertNotIn("En una Short PUT, theta positivo", page)
         for help_text in (
             "Días restantes hasta el vencimiento de la opción.",
             "Mayor distancia proporciona mayor colchón, normalmente a cambio de menor prima.",
@@ -560,7 +563,7 @@ class WebTest(TestCase):
 
     def test_interpretation_explains_incomplete_contracts(self):
         block = self.interpretation(incomplete=7)
-        self.assertIn("7 contratos no pudieron evaluarse completamente por falta de bid, ask o delta.", block)
+        self.assertIn("7 contratos no pudieron evaluarse completamente por market data incompleta/no disponible.", block)
 
     def test_interpretation_explains_partial_timeout_and_pending_count(self):
         block = self.interpretation(timed_out=True, unresolved_contracts_timeout=92,
@@ -594,8 +597,29 @@ class WebTest(TestCase):
         )
         self.assertIn("Ver detalles del análisis", block)
         self.assertIn("Contratos descartados", block)
-        for label, count in (("Distancia al strike", 202), ("Delta", 29), ("Datos incompletos", 7), ("Timeout", 11)):
+        for label, count in (("Distancia mínima al strike", 202), ("|Delta| mínimo/máximo", 29),
+                             ("Market data incompleta/no disponible", 7), ("No evaluados", 11)):
             self.assertIn(f"<dt>{label}</dt><dd>{count}</dd>", block)
+
+    def test_interpretation_lists_precise_rejection_reasons_and_all_counters(self):
+        discarded = DiscardedContract(
+            "AEHR", date(2026, 9, 25), 80,
+            ("IV 111.9600% < mínimo 112.0000%",
+             "Theta short 0.121000 < mínimo 0.130000"),
+        )
+        block = self.interpretation(
+            rejected_dte=1, rejected_margin=2, rejected_delta=3, rejected_iv=4,
+            rejected_theta=5, incomplete=6, discarded_contracts=[discarded],
+        )
+        for label, count in (("DTE", 1), ("Distancia mínima al strike", 2),
+                             ("|Delta| mínimo/máximo", 3), ("IV mínima", 4),
+                             ("Theta short mínimo", 5),
+                             ("Market data incompleta/no disponible", 6)):
+            self.assertIn(f"<dt>{label}</dt><dd>{count}</dd>", block)
+        self.assertIn(
+            "AEHR · 2026-09-25 · PUT $80 · IV 111.9600% &lt; mínimo 112.0000%; "
+            "Theta short 0.121000 &lt; mínimo 0.130000", block,
+        )
 
     def test_interpretation_and_heading_sanitize_market_status(self):
         malicious = 'Frozen<script>alert("x")</script>'
