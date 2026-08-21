@@ -307,3 +307,41 @@ y [WebSocket de Client Portal API](https://ibkrcampus.com/campus/ibkr-api-page/c
 
 Una iteración futura podrá añadir filtros de liquidez y rentabilidad sobre las
 métricas ya disponibles.
+### Histórico y contexto técnico
+
+Después de un scan, la interfaz muestra barras OHLC diarias, zonas y los strikes de
+los candidatos completos en un SVG sin dependencias JavaScript externas. El selector
+admite 3M, 6M (valor predeterminado) y 1A. En vivo se reutiliza la sesión del Client
+Portal Gateway y se consulta exclusivamente `GET /iserver/marketdata/history` con
+`bar=1d`; en demo se genera una serie determinista y reproducible. El estado de market
+data `Frozen` no invalida el histórico: se identifica explícitamente la última sesión.
+
+El cálculo es determinista y está separado del scanner financiero:
+
+* **ATR de Wilder (14 por defecto):** `TR(t) = max(high-low,
+  |high-close(t-1)|, |low-close(t-1)|)`. Hasta completar el periodo se usa la media
+  acumulada de TR y después `ATR(t) = (ATR(t-1) * (periodo-1) + TR(t)) / periodo`.
+* **Pivote (ventana 3 por defecto):** un pivot low tiene un `low` estrictamente menor
+  que todos los lows de las tres barras anteriores y posteriores; un pivot high aplica
+  la regla simétrica a `high`. La ventana y el periodo ATR son configurables.
+* **Zona:** se separan pivotes low (soporte) y high (resistencia), se ordenan por precio
+  y se incorporan al primer grupo cuya media diste como máximo `max(0.6 * ATR,
+  0.2 % del último close)`. Sus límites son mínimo/máximo contacto más media tolerancia
+  a cada lado; el centro es la media de contactos.
+* **Fuerza, no probabilidad:** `min(100, 15 + min(40, 10*contactos) + 20*recencia
+  + 15*reacción + 10*persistencia)`. Recencia decrece linealmente de 1 a 0 en 180 días;
+  reacción es la reacción media posterior, limitada a 2 ATR y normalizada a 0–1;
+  persistencia es el tiempo entre primer y último contacto, limitado a 120 días y
+  normalizado. Menos de 45 es **débil**, 45–69.9 **media**, y 70 o más **fuerte**.
+* **Rotura conservadora:** soporte roto si un cierre posterior queda por debajo del
+  límite inferior menos `0.5 ATR`; resistencia rota si queda por encima del límite
+  superior más `0.5 ATR`. No se infiere inversión sin confirmación adicional, por lo
+  que actualmente `inverted` permanece falso.
+
+El endpoint de IBKR puede entregar menos sesiones que el periodo solicitado, omitir
+volumen, devolver una respuesta parcial o requerir permisos/sesión autenticada según
+la configuración de la cuenta y del Gateway. El adaptador omite filas malformadas y
+mantiene los modelos internos independientes del payload de IBKR.
+
+Las zonas se derivan del comportamiento histórico del precio y no garantizan
+reacciones futuras. No constituyen una recomendación de inversión.

@@ -11,6 +11,8 @@ from typing import Callable
 from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
 from options_scanner.market_data import FakeMarketDataProvider
 from options_scanner.scanner import PutScanCandidate, build_candidates, rank_candidates, scan_puts
+from options_scanner.historical import DemoHistoricalDataProvider, HistoricalPeriod
+from options_scanner.technical_context import TechnicalContext, build_technical_context
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +24,7 @@ class ScanRequest:
     min_abs_delta: float = .15
     max_abs_delta: float = .30
     fake: bool = False
+    historical_period: HistoricalPeriod = HistoricalPeriod.SIX_MONTHS
 
     def __post_init__(self) -> None:
         ticker = self.ticker.strip().upper()
@@ -81,6 +84,7 @@ class ScanResult:
     market_data_status: str | None = None
     updated_at: datetime | None = None
     simulated: bool = False
+    technical_context: TechnicalContext | None = None
 
 
 class PutScanService:
@@ -142,5 +146,11 @@ class PutScanService:
         incomplete = tuple(candidate for candidate in candidates if not candidate.complete)
         resolved_underlying = underlying if request.fake else getattr(real_provider, "last_underlying", None)
         price = resolved_underlying.current_price if resolved_underlying is not None else None
+        technical = None
+        if price is not None:
+            history_provider = DemoHistoricalDataProvider(as_of) if request.fake else real_provider
+            bars = history_provider.get_historical_bars(request.ticker, request.historical_period)
+            technical = build_technical_context(request.ticker, request.historical_period, bars, price,
+                                                (candidate.strike for candidate in ranked if candidate.complete))
         return ScanResult(ranked, summary, max(0.0, self._clock() - started), incomplete,
-                          price, market_status, datetime.now(timezone.utc), request.fake)
+                          price, market_status, datetime.now(timezone.utc), request.fake, technical)
