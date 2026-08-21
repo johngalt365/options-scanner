@@ -1,11 +1,12 @@
 from io import BytesIO
+from dataclasses import replace
 from unittest import TestCase
 
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import (DiscardedContract, PutScanService, ScanMetrics,
                                           ScanRequest, ScanResult)
 from options_scanner.scanner import PutScanCandidate
-from options_scanner.web import (_directional_distance, _interpretation, _multi_screener, _rows, create_app, ibkr_connection_status, parse_tickers,
+from options_scanner.web import (_directional_distance, _evaluation_section, _interpretation, _multi_screener, _rows, create_app, ibkr_connection_status, parse_tickers,
                                  render_page, render_technical_screener, resolve_universe)
 from options_scanner.historical import HistoricalBar
 from datetime import timedelta
@@ -18,6 +19,7 @@ from options_scanner.historical import HistoricalPeriod
 from datetime import date
 from options_scanner.models import User
 from options_scanner.workspace import UserWorkspaceStore
+from options_scanner.short_put_ranking import rank_by_score
 
 
 def test_ranked_evaluation_reaches_single_and_multi_renderers_end_to_end():
@@ -47,6 +49,63 @@ def test_ranked_evaluation_reaches_single_and_multi_renderers_end_to_end():
         assert "Datos ausentes que reducen la confianza:" in page
     assert '<th class="detail-launch"><span class="sr-only">Abrir detalle</span></th><th><button type="button" class="sort-button" data-column="0" data-kind="text">Ticker' in multi
     assert 'class="sort-button" data-column="1" data-kind="number">Score' in multi
+
+
+def test_evaluation_identifies_winner_and_complete_candidate_count():
+    result = PutScanService(today=lambda: date(2026, 8, 20)).run(
+        ScanRequest(ticker="NVDA", fake=True, historical_period=HistoricalPeriod.MULTI)
+    )
+    best = result.candidates[0]
+    page = render_page(values={"ticker": "NVDA"}, result=result).decode()
+
+    assert (f"Evaluación Short PUT — {best.ticker} · PUT ${best.strike:g} · "
+            f"{best.expiration.day} Sep {best.expiration.year} · {best.dte} DTE") in page
+    assert f"Mejor candidato de {len(result.candidates)} contratos completos" in page
+    assert "<th>Ticker</th><th>Score</th><th>Evaluación</th><th>Expiration</th>" in page
+
+
+def test_every_complete_candidate_uses_attached_evaluation_in_score_order():
+    result = PutScanService(today=lambda: date(2026, 8, 20)).run(
+        ScanRequest(ticker="NVDA", fake=True, historical_period=HistoricalPeriod.MULTI)
+    )
+    rows = _rows(result)
+    scores = [candidate.evaluation.total_score for candidate in result.candidates]
+
+    assert scores == sorted(scores, reverse=True)
+    for candidate in result.candidates:
+        assert candidate.evaluation is not None
+        assert f"{candidate.evaluation.total_score:.2f}" in rows
+        assert candidate.evaluation.label in rows
+    assert rows.index(f"{scores[0]:.2f}") < rows.index(f"{scores[-1]:.2f}")
+
+
+def test_winner_score_is_identical_in_multi_detail_evaluation_and_first_row():
+    result = PutScanService(today=lambda: date(2026, 8, 20)).run(
+        ScanRequest(ticker="NVDA", fake=True, historical_period=HistoricalPeriod.MULTI)
+    )
+    best = result.candidates[0]
+    score = f"{best.evaluation.total_score:.2f}"
+    multi = render_page(multi_results=((best.ticker, result, None),)).decode()
+
+    assert f'<td data-sort-value="{score}">{score}</td>' in multi
+    assert f"<summary>{score}/100 · {best.evaluation.label}</summary>" in multi
+    assert f"<dd>{score}/100 · {best.evaluation.label}</dd>" in multi
+    assert _rows(result).split("</tr>", 1)[0].count(score) >= 2
+
+
+def test_single_candidate_and_missing_optional_data_remain_explicit():
+    result = PutScanService(today=lambda: date(2026, 8, 20)).run(
+        ScanRequest(ticker="NVDA", fake=True, historical_period=HistoricalPeriod.MULTI)
+    )
+    candidate = replace(result.candidates[0], implied_volatility=None, theta=None,
+                        open_interest=None)
+    winner = rank_by_score([candidate], result.technical_context)[0]
+    section = _evaluation_section(winner, 1)
+    rows = _rows(replace(result, candidates=(winner,)))
+
+    assert "Mejor candidato de 1 contrato completo" in section
+    assert "IV" in section and "theta relativo" in section and "open interest" in section
+    assert f"{winner.evaluation.total_score:.2f}" in rows
 
 
 def request(app, method="GET", body=""):
@@ -437,7 +496,8 @@ class WebTest(TestCase):
         service = MixedService()
         status, page = request(create_app(service), "POST", FORM.replace("NVDA", "nvda%2C+BAD+spy"))
         self.assertEqual(status, "200 OK")
-        self.assertEqual([item.ticker for item in service.requests], ["NVDA", "BAD", "SPY"])
+        # Workers may enter the stub in any order; output remains in input order.
+        self.assertCountEqual([item.ticker for item in service.requests], ["NVDA", "BAD", "SPY"])
         self.assertEqual(page.count('class="ticker-detail"'), 3)
         self.assertIn("Screener multi-ticker", page)
         self.assertIn("Delayed", page)
