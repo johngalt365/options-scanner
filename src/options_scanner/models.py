@@ -10,6 +10,15 @@ class OptionType(StrEnum):
     PUT = "PUT"
 
 
+def short_put_theta(contract_theta: float | None) -> float | None:
+    """Invert contractual theta once to obtain a short position exposure.
+
+    No absolute-value normalization is intentional: the wire sign remains
+    observable and a positive contractual value yields a negative exposure.
+    """
+    return None if contract_theta is None else -contract_theta
+
+
 def _require_text(value: str, field_name: str) -> None:
     if not value.strip():
         raise ValueError(f"{field_name} no puede estar vacío")

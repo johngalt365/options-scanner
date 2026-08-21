@@ -60,6 +60,22 @@ class IbkrMappingTest(TestCase):
         self.assertEqual((quote.volume, quote.open_interest), (0, 1750))
         self.assertEqual(quote.market_data_availability, "ZBd")
 
+    def test_theta_wire_sign_is_preserved_for_both_signs(self):
+        for wire_theta in ("-0.134", "-0.112", "+0.118"):
+            transport = StubTransport()
+            original_get = transport.get
+
+            def get(path, params, *, _original=original_get, _theta=wire_theta):
+                rows = _original(path, params)
+                for row in rows:
+                    if "7310" in row:
+                        row["7310"] = _theta
+                return rows
+
+            transport.get = get
+            quote = IbkrMarketDataProvider(transport).get_option_market_data("NVDA")[0]
+            self.assertEqual(quote.theta, float(wire_theta))
+
     def test_ambiguous_month_uses_only_exactly_confirmed_contracts(self):
         class AmbiguousTransport(StubTransport):
             def get(self, path, params):

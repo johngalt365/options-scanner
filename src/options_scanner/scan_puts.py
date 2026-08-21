@@ -253,7 +253,7 @@ def _ibkr_candidates(
         ):
             continue
         elif getattr(args, "min_short_theta", None) is not None and (
-            quote.theta is None or -quote.theta < args.min_short_theta
+            candidate.short_theta is None or candidate.short_theta < args.min_short_theta
         ):
             continue
         else:
