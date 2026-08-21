@@ -230,11 +230,26 @@ def _strike_support_explanation(candidate, context=None) -> str:
             f"{candidate.support_zone_label} {strength}{contacts}.")
 
 
+def _evaluation_detail(candidate) -> str:
+    e = candidate.evaluation
+    if e is None:
+        return '<span class="na">Evaluación no calculada</span>'
+    strengths = "; ".join(e.strengths) or "Sin fortalezas destacadas por las reglas v1"
+    weaknesses = "; ".join(e.weaknesses) or "Sin debilidades destacadas por las reglas v1"
+    missing = f'<p><strong>Datos ausentes:</strong> {escape(", ".join(e.missing_data))}</p>' if e.missing_data else ""
+    return (f'<details class="score-detail"><summary>{e.total_score:.2f}/100 · {escape(e.label)}</summary>'
+            f'<p>Riesgo {e.risk_score:.2f}/30 · Técnico {e.technical_score:.2f}/25 · '
+            f'Prima/IV {e.premium_score:.2f}/20 · Theta {e.theta_score:.2f}/15 · '
+            f'Liquidez {e.liquidity_score:.2f}/10 · Total {e.total_score:.2f}/100</p>'
+            f'<p><strong>Fortalezas:</strong> {escape(strengths)}.</p>'
+            f'<p><strong>Debilidades:</strong> {escape(weaknesses)}.</p>{missing}</details>')
+
+
 def _rows(result: ScanResult | None) -> str:
     if result is None:
         return ""
     if not result.candidates:
-        return '<tr><td colspan="21" class="empty">No hay candidatos completos para estos filtros.</td></tr>'
+        return '<tr><td colspan="25" class="empty">No hay candidatos completos para estos filtros.</td></tr>'
     rendered = []
     for c in result.candidates:
         availability = escape(str(c.market_data_availability))
@@ -248,6 +263,10 @@ def _rows(result: ScanResult | None) -> str:
             _number(c.vega, 4), _percent(c.implied_volatility),
             _number(c.open_interest), availability, _percent(c.premium_yield),
             _percent(c.annualized_premium_yield),
+            _percent(c.relative_spread),
+            _number(c.evaluation.total_score if c.evaluation else None),
+            escape(c.evaluation.label) if c.evaluation else '<span class="na">N/D</span>',
+            _evaluation_detail(c),
             _candidate_technical_context(c, result.technical_context),
         )
         rendered.append("<tr>" + "".join(f"<td>{value}</td>" for value in cells) + "</tr>")
@@ -535,6 +554,10 @@ def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
 def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...],
                     metrics: MultiScanMetrics | None = None) -> str:
     """Render comparison only; candidate ranking remains isolated per ticker."""
+    # Cross-ticker order uses each ticker's already-ranked best valid contract.
+    items = tuple(sorted(items, key=lambda item: (
+        -(item[1].candidates[0].evaluation.total_score if item[1] and item[1].candidates and item[1].candidates[0].evaluation else -1),
+        item[0])))
     rows = []
     with_candidates = errors = 0
     elapsed = 0.0
@@ -542,7 +565,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                      result.technical_context.period == HistoricalPeriod.MULTI
                      for _, result, _ in items)
     sortable = {0: "text", 1: "number", 4: "number", 6: "number", 7: "number", 8: "number", 9: "number", 10: "number",
-                11: "number", 12: "number", 13: "number", 14: "number", 15: "number", 16: "number"}
+                11: "number", 12: "number", 13: "number", 14: "number", 15: "number", 16: "number", 17: "number"}
     def badge(state: str | None) -> str:
         value = state or "N/D"
         lowered = value.lower()
@@ -553,7 +576,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
         if result is None:
             errors += 1
             cells = ((f'<button type="button" class="ticker-link detail-trigger" aria-label="Ver detalle de {escape(ticker)}">{escape(ticker)}</button>', ticker),
-                     ("N/D", ""), (badge(None), "")) + tuple(("N/D", "") for _ in range(15))
+                     ("N/D", ""), (badge(None), "")) + tuple(("N/D", "") for _ in range(17))
             detail = f'<div class="row-error" role="status">{escape(item_error or "No se pudo completar este ticker.")}</div>'
             row_class = "error-result"
         else:
@@ -600,6 +623,8 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                 (f"{best.premium_yield*100:.2f} %" if best and best.premium_yield is not None else "N/D", best.premium_yield if best and best.premium_yield is not None else ""),
                 (f"{best.annualized_premium_yield*100:.2f} %" if best and best.annualized_premium_yield is not None else "N/D", best.annualized_premium_yield if best and best.annualized_premium_yield is not None else ""),
                 (_number(best.open_interest) if best else "N/D", best.open_interest if best else ""),
+                (_number(best.evaluation.total_score) if best and best.evaluation else "N/D", best.evaluation.total_score if best and best.evaluation else ""),
+                (escape(best.evaluation.label) if best and best.evaluation else "N/D", best.evaluation.label if best and best.evaluation else ""),
                 ((relationship.position_label if multi_mode and context else _strike_context_label(best))
                  if best else "N/D",
                  (relationship.position_label if best and multi_mode and context else
@@ -608,7 +633,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
             detail = (_result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
                       (f'<p class="strike-explanation">{escape(_strike_support_explanation(best, context))}</p>' if best else '') +
                       '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
-                      ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico')) +
+                      ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Score','Evaluación','Desglose','Contexto técnico')) +
                       f'</tr></thead><tbody>{_rows(result)}</tbody></table></div>{_summary(result)}')
             if best and multi_mode and context:
                 relation_class = {
@@ -630,7 +655,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                         else ('S1','Distancia S1','Fuerza S1'))
     headings = ('Ticker','Precio','Estado',*context_headings,'Candidatos',
                 'Strike','DTE','Distancia al strike','Delta','Theta short','Theta %/día','IV',
-                'Premium yield','Annualized yield','Open interest','Contexto técnico del strike')
+                'Premium yield','Annualized yield','Open interest','Score','Evaluación','Contexto técnico del strike')
     headers = []
     for i, heading in enumerate(headings):
         content = heading
@@ -679,7 +704,7 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
         <button name="action" value="watchlist_delete" type="submit" class="danger">Eliminar</button></form>'''
         for item in (watchlists or {}).values()
     )
-    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
+    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Score','Evaluación','Desglose','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
     def help_icon(identifier: str, title: str, explanation: str) -> str:
         """Return an accessible, layout-independent educational tooltip."""
         return (f'<span class="filter-help"><button class="help-trigger" type="button" '
