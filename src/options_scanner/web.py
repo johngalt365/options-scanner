@@ -470,7 +470,15 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
         rendered = ''.join(f'<td data-sort-value="{escape(str(sort_value if sort_value is not None else ""))}">{value}</td>' for value, sort_value in cells)
         rows.append(f'<tr data-ticker="{escape(ticker)}" class="{row_class}">{rendered}<td><details class="ticker-detail"><summary>Ver detalle</summary><div class="detail-panel"><button type="button" class="detail-close" aria-label="Cerrar detalle">Cerrar</button>{detail}</div></details></td></tr>')
     headings = ('Ticker','Precio','Estado','S1','Distancia S1','Fuerza S1','Candidatos','Mejor strike','Delta','Premium yield','Annualized yield')
-    headers = ''.join(f'<th>{f"<button type=\"button\" class=\"sort-button\" data-column=\"{i}\" data-kind=\"{sortable[i]}\">{h} <span aria-hidden=\"true\">↕</span></button>" if i in sortable else h}</th>' for i, h in enumerate(headings))
+    headers = []
+    for i, heading in enumerate(headings):
+        content = heading
+        if i in sortable:
+            content = (f'<button type="button" class="sort-button" data-column="{i}" '
+                       f'data-kind="{sortable[i]}">{heading} '
+                       '<span aria-hidden="true">↕</span></button>')
+        headers.append(f'<th>{content}</th>')
+    rendered_headers = ''.join(headers)
     total = len(items)
     timing = (f' · total {metrics.elapsed_seconds:.1f} s · ticker p50/p95 '
               f'{metrics.ticker_seconds_p50:.1f}/{metrics.ticker_seconds_p95:.1f} s'
@@ -478,7 +486,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
     return ('<section class="screener" aria-labelledby="screener-title"><h2 id="screener-title">Screener multi-ticker</h2>'
             f'<div class="scan-summary" role="status">{total} tickers · {with_candidates} con candidatos · {total-with_candidates-errors} sin candidatos{timing} · {errors} error</div>'
             '<div class="quick-filters" role="group" aria-label="Filtros rápidos"><button type="button" class="active" data-filter="all">Todos</button><button type="button" data-filter="has-candidates">Con candidatos</button><button type="button" data-filter="no-candidates">Sin candidatos</button><button type="button" data-filter="strong">Soporte fuerte</button><button type="button" data-filter="near">Cerca de S1</button></div>'
-            '<div class="scroll"><table class="screener-table"><thead><tr>' + headers + '<th>Acción</th>' +
+            '<div class="scroll"><table class="screener-table"><thead><tr>' + rendered_headers + '<th>Acción</th>' +
             '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></section>')
 
 
