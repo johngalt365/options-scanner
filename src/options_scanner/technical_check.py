@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from html import escape
+import logging
 from pathlib import Path
 import sys
+import time
 from typing import Protocol
 
 from options_scanner.historical import HistoricalDataProvider, HistoricalPeriod
@@ -17,6 +19,7 @@ from options_scanner.technical_context import TechnicalContext, build_technical_
 
 
 DEFAULT_TICKERS = ("NVDA", "AAPL", "MSFT", "AMZN", "TSLA")
+logger = logging.getLogger(__name__)
 
 
 class PriceProvider(Protocol):
@@ -31,6 +34,10 @@ class TechnicalCheckResult:
     context: TechnicalContext | None
     historical_status: str
     error: str | None = None
+    market_data_status: str = "Disponible"
+    bars_received: int = 0
+    historical_seconds: float = 0.0
+    technical_seconds: float = 0.0
 
     @property
     def bar_count(self) -> int:
@@ -42,6 +49,7 @@ def check_tickers(
     period: HistoricalPeriod,
     price_provider: PriceProvider,
     history_provider: HistoricalDataProvider | None = None,
+    *, clock=time.monotonic,
 ) -> tuple[TechnicalCheckResult, ...]:
     """Build each ticker independently and retain partial results on failure."""
     history_provider = history_provider or price_provider  # type: ignore[assignment]
@@ -52,16 +60,35 @@ def check_tickers(
             price = price_provider.get_underlying(symbol).current_price
         except Exception as exc:
             results.append(TechnicalCheckResult(
-                symbol, period, None, None, "not_requested", _safe_error(exc),
+                symbol, period, None, None, "not_requested", _safe_error(exc), "No disponible",
             ))
             continue
         try:
+            historical_started = clock()
             bars = history_provider.get_historical_bars(symbol, period)
+            historical_seconds = max(0.0, clock() - historical_started)
+            bars_received = getattr(history_provider, "last_historical_bars_received",
+                                    getattr(history_provider, "last_bars_received", len(bars)))
             status = "ok" if bars else "empty"
+            technical_started = clock()
             context = build_technical_context(symbol, period, bars, price)
-            results.append(TechnicalCheckResult(symbol, period, price, context, status))
+            technical_seconds = max(0.0, clock() - technical_started)
+            availability = getattr(price_provider, "last_underlying_market_data_availability", None)
+            market_status = availability.feed if availability is not None else "Disponible"
+            result = TechnicalCheckResult(symbol, period, price, context, status, None, market_status,
+                                          bars_received, historical_seconds, technical_seconds)
+            results.append(result)
+            logger.info(
+                "ticker=%s historical/bars_received=%d historical/bars_valid=%d "
+                "technical/supports_active=%d technical/resistances_active=%d "
+                "historical_time=%.3fs technical_time=%.3fs",
+                symbol, result.bars_received, result.bar_count,
+                len(context.supports_below_price), len(context.resistances_above_price),
+                historical_seconds, technical_seconds,
+            )
         except Exception as exc:
-            results.append(TechnicalCheckResult(symbol, period, price, None, "error", _safe_error(exc)))
+            results.append(TechnicalCheckResult(symbol, period, price, None, "error", _safe_error(exc),
+                                                "No disponible"))
     return tuple(results)
 
 
@@ -82,13 +109,14 @@ def _visible_zones(result: TechnicalCheckResult) -> tuple[tuple[str, PriceZone |
 
 
 def format_summary(results: tuple[TechnicalCheckResult, ...]) -> str:
-    rows = ["Ticker | Precio | Nivel | Centro | Fuerza | Contactos | Último contacto | Barras | Histórico"]
+    rows = ["Ticker | Precio | Estado | Nivel | Centro | Fuerza | Contactos | Último contacto | Barras | Histórico"]
     rows.append("-" * 104)
     for result in results:
         for index, (label, zone) in enumerate(_visible_zones(result)):
             rows.append(" | ".join((
                 result.symbol if index == 0 else "",
                 f"${result.price:.2f}" if index == 0 and result.price is not None else ("N/D" if index == 0 else ""),
+                result.market_data_status if index == 0 else "",
                 label,
                 f"${zone.center:.2f}" if zone else "N/D",
                 zone.strength if zone else "N/D",

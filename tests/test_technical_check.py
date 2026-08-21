@@ -2,10 +2,14 @@ from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
+from contextlib import redirect_stdout
+from io import StringIO
 
 from options_scanner.historical import HistoricalBar, HistoricalPeriod
 from options_scanner.models import Underlying
 from options_scanner.technical_check import check_tickers, format_summary, main, render_charts
+from options_scanner.ibkr import MarketDataAvailability
 
 
 def series(base: float) -> tuple[HistoricalBar, ...]:
@@ -35,6 +39,35 @@ class MultiTickerProvider:
 
 
 class TechnicalCheckTest(TestCase):
+    def test_five_tickers_keep_deterministic_input_order(self):
+        symbols = ("NVDA", "AAPL", "MSFT", "AMZN", "TSLA")
+        class Provider:
+            def get_underlying(self, symbol):
+                return Underlying(symbol, 100 + symbols.index(symbol))
+            def get_historical_bars(self, symbol, period):
+                return series(100 + symbols.index(symbol))
+        results = check_tickers(symbols, HistoricalPeriod.SIX_MONTHS, Provider())
+        self.assertEqual(tuple(item.symbol for item in results), symbols)
+        self.assertEqual(len({id(item.context) for item in results}), 5)
+
+    def test_empty_history_is_safe_and_instrumented(self):
+        class Provider:
+            last_historical_bars_received = 7
+            def get_underlying(self, symbol): return Underlying(symbol, 100)
+            def get_historical_bars(self, symbol, period): return ()
+        result = check_tickers(("NVDA",), HistoricalPeriod.SIX_MONTHS, Provider())[0]
+        self.assertEqual((result.historical_status, result.bars_received, result.bar_count), ("empty", 7, 0))
+
+    def test_mixed_realtime_and_frozen_states_are_captured_per_ticker(self):
+        class Provider:
+            def get_underlying(self, symbol):
+                feed = "Frozen" if symbol == "AAPL" else "RealTime"
+                self.last_underlying_market_data_availability = MarketDataAvailability(None, feed, False, False)
+                return Underlying(symbol, 100)
+            def get_historical_bars(self, symbol, period): return series(100)
+        results = check_tickers(("NVDA", "AAPL"), HistoricalPeriod.SIX_MONTHS, Provider())
+        self.assertEqual([item.market_data_status for item in results], ["RealTime", "Frozen"])
+
     def test_ticker_contexts_are_isolated(self):
         provider = MultiTickerProvider()
         results = check_tickers(("aaa", "bbb"), HistoricalPeriod.SIX_MONTHS, provider)
@@ -69,6 +102,18 @@ class TechnicalCheckTest(TestCase):
 
     def test_cli_rejects_an_empty_ticker_list(self):
         self.assertEqual(main(["--tickers", " , "]), 2)
+
+    def test_cli_runs_multiple_tickers_and_prints_safe_compact_rows(self):
+        provider = MultiTickerProvider()
+        with patch("options_scanner.technical_check.IbkrMarketDataProvider", return_value=provider), \
+             redirect_stdout(StringIO()) as output:
+            code = main(["--tickers", "CCC,AAA,BBB", "--period", "6M"])
+        text = output.getvalue()
+        self.assertEqual(code, 0)
+        self.assertLess(text.index("CCC"), text.index("AAA"))
+        self.assertLess(text.index("AAA"), text.index("BBB"))
+        for heading in ("Precio", "Estado", "S1", "R2", "Fuerza", "Contactos", "Barras"):
+            self.assertIn(heading, text)
 
     def test_chart_report_can_be_written(self):
         results = check_tickers(("AAA",), HistoricalPeriod.SIX_MONTHS, MultiTickerProvider())
