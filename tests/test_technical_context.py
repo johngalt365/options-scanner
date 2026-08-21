@@ -112,11 +112,33 @@ class TechnicalMapTest(TestCase):
     def test_deterministic_support_zone_position_labels(self):
         from options_scanner.technical_context import classify_strike_against_zones
         supports=(self.zone(215),self.zone(200),self.zone(185))
-        expected={215:"Dentro de S1",208:"Entre S1 y S2",200:"Dentro de S2",170:"Por debajo de S3"}
+        expected={220:"Por encima de S1",215:"Dentro de S1",208:"Entre S1/S2",
+                  200:"Dentro de S2",193:"Entre S2/S3",185:"Dentro de S3",
+                  170:"Por debajo de S3"}
         for strike,label in expected.items():
             with self.subTest(strike=strike):
                 self.assertEqual(classify_strike_against_zones(strike,supports,220).position_label,label)
         self.assertIsNone(classify_strike_against_zones(200,(),220).position_label)
+
+    def test_exact_zone_limits_are_inside_and_support_count_is_variable(self):
+        from options_scanner.technical_context import classify_strike_against_zones
+        supports=(self.zone(200),self.zone(185))
+        for strike,label in ((201,"Dentro de S1"),(199,"Dentro de S1"),
+                             (186,"Dentro de S2"),(184,"Dentro de S2"),
+                             (190,"Entre S1/S2"),(180,"Por debajo de S2")):
+            with self.subTest(strike=strike):
+                self.assertEqual(classify_strike_against_zones(strike,supports,210).position_label,label)
+
+    def test_nvda_example_uses_s3_boundary_as_relevant_distance(self):
+        from options_scanner.technical_context import classify_strike_against_zones
+        session=date(2026,1,2)
+        supports=(PriceZone(192.75,200.87,196.81,ZoneType.SUPPORT,3,session,20,"media"),
+                  PriceZone(186.80,192.59,189.695,ZoneType.SUPPORT,3,session,20,"media"),
+                  PriceZone(161.51,165.49,163.5,ZoneType.SUPPORT,2,session,20,"débil"))
+        context=classify_strike_against_zones(170,supports,215.80)
+        self.assertEqual((context.position_label,context.zone_label,context.position),
+                         ("Entre S2/S3","S3",StrikePosition.ABOVE_SUPPORT))
+        self.assertAlmostEqual(context.distance_percent,(170-165.49)/165.49*100)
 
     def test_active_zone_map_order_and_broken_zone_exclusion(self):
         from unittest.mock import patch

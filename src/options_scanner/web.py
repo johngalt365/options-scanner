@@ -48,7 +48,13 @@ def _candidate_technical_context(candidate) -> str:
     compact_position = (candidate.support_position_label.replace("Dentro de ", "Dentro ")
                         .replace("Por debajo de ", "Debajo ")
                         .replace("Por encima de ", "Encima ").replace(" y ", "/"))
-    compact = f"{compact_position} · {strength.capitalize()}" if "Dentro" in compact_position else compact_position
+    relation = {
+        StrikePosition.ABOVE_SUPPORT: "sobre",
+        StrikePosition.BELOW_SUPPORT: "bajo",
+        StrikePosition.INSIDE_SUPPORT: "en",
+    }.get(candidate.support_position)
+    relevant = f"{relation} {candidate.support_zone_label} {strength}" if relation else strength
+    compact = f"{compact_position} · {relevant}"
     distance = "N/D" if candidate.distance_to_support_pct is None else f"{candidate.distance_to_support_pct:+.2f} %"
     sessions = "N/D" if candidate.support_last_contact_sessions is None else str(candidate.support_last_contact_sessions)
     label = candidate.support_zone_label or "soporte"
@@ -61,7 +67,7 @@ def _candidate_technical_context(candidate) -> str:
         f'<div><dt>Fuerza</dt><dd>{escape(strength)}</dd></div>'
         f'<div><dt>Contactos</dt><dd>{zone.contacts}</dd></div>'
         f'<div><dt>Último contacto</dt><dd>{sessions} sesiones</dd></div>'
-        f'<div><dt>Distancia</dt><dd>{escape(distance)}</dd></div></dl></details>'
+        f'<div><dt>Distancia al límite de {escape(label)}</dt><dd>{escape(distance)}</dd></div></dl></details>'
     )
 
 
@@ -129,7 +135,16 @@ def _interpretation(result: ScanResult | None) -> str:
     messages: list[tuple[str, str]] = []
     details: list[str] = []
 
-    if candidate_count:
+    if summary.timed_out:
+        noun = "candidato" if candidate_count == 1 else "candidatos"
+        verb = "encontrado" if candidate_count == 1 else "encontrados"
+        not_evaluated = max(0, summary.target_contracts - summary.considered)
+        messages.append((
+            "warning",
+            f"{candidate_count} {noun} {verb} entre {summary.considered} contratos evaluados. "
+            f"{not_evaluated} contratos objetivo no llegaron a evaluarse.",
+        ))
+    elif candidate_count:
         messages.extend((
             ("success", f"Se encontraron {candidate_count} candidatos que cumplen todos los filtros actuales."),
             ("neutral", "Ordenados por rentabilidad anualizada de la prima."),
@@ -143,14 +158,8 @@ def _interpretation(result: ScanResult | None) -> str:
     if summary.timed_out:
         messages.append((
             "warning",
-            "El scan terminó con resultados parciales porque no se resolvieron todos los contratos "
+            "El scan terminó con resultados parciales porque no se completaron todas las fases "
             "dentro del tiempo disponible.",
-        ))
-        messages.append((
-            "warning",
-            f"Se evaluaron {summary.considered} contratos de {summary.target_contracts} objetivos antes de agotarse el tiempo de resolución."
-            if summary.timeout_phase == "contract_resolution" else
-            f"{summary.unresolved_contracts_timeout} contratos quedaron pendientes.",
         ))
     if result.market_data_status and "Frozen" in result.market_data_status:
         messages.append((
@@ -174,7 +183,13 @@ def _interpretation(result: ScanResult | None) -> str:
         ))
     details.extend(reason_messages)
     if summary.timed_out:
-        details.append(f"Timeout: {summary.unresolved_contracts_timeout} contratos pendientes.")
+        details.extend((
+            f"Contratos objetivo: {summary.target_contracts}.",
+            f"Contratos resueltos: {summary.resolved_contracts}.",
+            f"Contratos que llegaron a market data/filtros: {summary.considered}.",
+            f"Candidatos completos: {candidate_count}.",
+            f"No resueltos por timeout: {summary.unresolved_contracts_timeout}.",
+        ))
 
     visible = "".join(
         f'<p class="interpretation-message {css_class}">{escape(message)}</p>'
@@ -290,8 +305,7 @@ def _technical_chart(result: ScanResult | None) -> str:
         sessions=sum(1 for bar in bars if bar.session > zone.last_contact)
         rows.append(f'<tr><th scope="row">{label}</th><td>${zone.lower:.2f}–${zone.upper:.2f}</td><td>{distance:+.2f} %</td><td>{zone.strength.capitalize()}</td><td>{zone.contacts}</td><td>{sessions} sesiones</td></tr>')
     explanation = '<div class="zone-table-wrap"><table class="zone-table"><thead><tr><th>Zona</th><th>Rango</th><th>Distancia</th><th>Fuerza</th><th>Contactos</th><th>Último contacto</th></tr></thead><tbody>'+''.join(rows)+'</tbody></table></div>'
-    names={StrikePosition.ABOVE_SUPPORT:"por encima del soporte relevante", StrikePosition.INSIDE_SUPPORT:"dentro del soporte relevante", StrikePosition.BELOW_SUPPORT:"por debajo del soporte relevante"}
-    strike_messages="".join(f'<li>Strike ${item.strike:.2f}: {names.get(item.position,"sin soporte activo")}.</li>' for item in context.strikes)
+    strike_messages="".join(f'<li>Strike ${item.strike:.2f}: {item.position_label or "sin soporte activo"}.</li>' for item in context.strikes)
     buttons = "".join(f'<button type="button" class="period-button{" active" if value == period else ""}" data-period="{value}" aria-pressed="{"true" if value == period else "false"}">{label}</button>' for value,label in period_labels.items())
     svg = f'<svg role="img" aria-label="Gráfico histórico diario con S1 S2 S3 R1 R2, ejes, precio actual y strikes" viewBox="0 0 {width} {height}">{"".join(y_ticks)}{"".join(zone_svg)}<path class="price" d="{path}"/>{current_line}{strike_lines}{"".join(date_ticks)}</svg>'
     return f'<section class="technical" data-ticker="{escape(context.symbol)}">{summary}<details id="{identity}"><summary><span aria-hidden="true">▥</span> Ver gráfico</summary><div class="chart-panel"><div class="period-selector" aria-label="Periodo histórico">{buttons}</div>{svg}{explanation}<div class="technical-context"><ul>{strike_messages}</ul><p class="disclaimer">Las zonas se derivan del comportamiento histórico del precio y no garantizan reacciones futuras. Son contexto informativo y no constituyen una recomendación de inversión.</p></div></div></details></section>'

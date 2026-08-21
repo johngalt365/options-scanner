@@ -47,12 +47,14 @@ class TechnicalContext:
 def classify_strike_against_zones(
     strike: float, supports: tuple[PriceZone, ...] | list[PriceZone], current_price: float
 ) -> StrikeContext:
-    """Classify *strike* against the closest relevant active support.
+    """Classify *strike* in the complete ordered map of active supports.
 
     Containing zones take precedence. Otherwise relevance is the shortest
-    distance to a zone boundary, which preserves the useful distinction for a
-    strike located between S1 and S2. ``current_price`` validates the shared
-    price frame and keeps this pure function explicit at call sites.
+    distance to a zone boundary. ``distance_percent`` is zero within a zone;
+    outside it, it is the signed percentage from the nearest boundary of the
+    relevant support (positive above, negative below). ``current_price``
+    validates the shared price frame and keeps this pure function explicit at
+    call sites.
     """
     if current_price <= 0:
         raise ValueError("current_price must be positive")
@@ -81,11 +83,14 @@ def classify_strike_against_zones(
         position_label = f"Por debajo de S{len(active)}"
     else:
         position_label = next(
-            (f"Entre S{i + 1} y S{i + 2}" for i, (upper, lower) in
+            (f"Entre S{i + 1}/S{i + 2}" for i, (upper, lower) in
              enumerate(zip(active, active[1:])) if lower.upper < strike < upper.lower),
             f"Por {'encima' if position == StrikePosition.ABOVE_SUPPORT else 'debajo'} de {zone_label}",
         )
-    return StrikeContext(strike, support, (strike - support.center) / support.center * 100,
+    relevant_boundary = (support.upper if strike > support.upper else
+                         support.lower if strike < support.lower else strike)
+    distance_percent = (strike - relevant_boundary) / relevant_boundary * 100
+    return StrikeContext(strike, support, distance_percent,
                          position, zone_label, position_label)
 
 
