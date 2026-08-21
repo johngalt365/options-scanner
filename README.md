@@ -394,8 +394,15 @@ PYTHONPATH=src python -m options_scanner.technical_check \
   --tickers NVDA,AAPL,MSFT,AMZN,TSLA --period 6M --insecure-tls
 ```
 
-La tabla muestra precio, S1–S3/R1–R2, fuerza, contactos, último contacto,
-número de barras y estado del histórico. Cada ticker se procesa de forma
+La tabla web compacta muestra por ticker precio y estado de market data, S1 y
+R1 (rango real de cada zona), distancia al borde más cercano, fuerza, contactos
+de S1, número de barras y estado del histórico. Si una zona no existe se muestra
+`N/D`: la presentación nunca crea niveles. La distancia de S1 añade una etiqueta
+informativa calculada desde su borde superior: **Dentro de soporte**, **Muy
+cerca** (hasta 2 % por encima), **Cerca** (más de 2 % y hasta 5 %), **Alejado**
+(más de 5 %) o **Por debajo**. Esta etiqueta no interviene en filtros ni ranking.
+
+Cada ticker se procesa de forma
 aislada: si falla su precio o histórico, el diagnóstico conserva el error y
 continúa con los demás. Para generar un informe visual bajo demanda, añade
 `--charts technical-check.html`; el HTML deja todos los gráficos colapsados por
@@ -405,5 +412,6 @@ descubre ni solicita contratos de opciones.
 Con la interfaz local iniciada, `http://127.0.0.1:8000/technical-check` ofrece
 la misma validación 6M como screener separado. La tabla obtiene las barras para
 calcular las zonas, pero no incluye ningún SVG inicialmente: el botón **📈 Ver
-gráfico** solicita y abre únicamente el detalle del ticker elegido. Un fallo se
+gráfico** solicita y abre únicamente el detalle del ticker elegido, cerrando
+cualquier otro detalle abierto. Un fallo se
 muestra como `No disponible` sin impedir que las demás filas terminen.

@@ -10,6 +10,9 @@ from options_scanner.historical import HistoricalBar, HistoricalPeriod
 from options_scanner.models import Underlying
 from options_scanner.technical_check import check_tickers, format_summary, main, render_charts
 from options_scanner.ibkr import MarketDataAvailability
+from options_scanner.technical_analysis import PriceZone, ZoneType
+from options_scanner.technical_context import (SupportProximity, classify_support_proximity,
+                                               distance_to_zone_percent)
 
 
 def series(base: float) -> tuple[HistoricalBar, ...]:
@@ -39,6 +42,24 @@ class MultiTickerProvider:
 
 
 class TechnicalCheckTest(TestCase):
+    def test_support_proximity_uses_s1_upper_edge_and_exact_boundaries(self):
+        support = PriceZone(90, 100, 95, ZoneType.SUPPORT, 3, date(2026, 1, 1), 1, "Media")
+        cases = (
+            (89.99, SupportProximity.BELOW),
+            (90, SupportProximity.INSIDE),
+            (100, SupportProximity.INSIDE),
+            (102, SupportProximity.VERY_CLOSE),
+            (102.01, SupportProximity.CLOSE),
+            (105, SupportProximity.CLOSE),
+            (105.01, SupportProximity.FAR),
+        )
+        for price, expected in cases:
+            with self.subTest(price=price):
+                self.assertEqual(classify_support_proximity(price, support), expected)
+        self.assertIsNone(classify_support_proximity(100, None))
+        self.assertEqual(distance_to_zone_percent(100, support), 0)
+        self.assertAlmostEqual(distance_to_zone_percent(102, support), 2)
+
     def test_five_tickers_keep_deterministic_input_order(self):
         symbols = ("NVDA", "AAPL", "MSFT", "AMZN", "TSLA")
         class Provider:

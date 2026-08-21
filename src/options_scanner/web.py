@@ -11,7 +11,8 @@ from wsgiref.simple_server import make_server
 from options_scanner.ibkr import GatewayUnavailableError, IbkrError, NotAuthenticatedError
 from options_scanner.scan_service import PutScanService, ScanRequest, ScanResult
 from options_scanner.historical import HistoricalPeriod
-from options_scanner.technical_context import StrikePosition
+from options_scanner.technical_context import (StrikePosition, classify_support_proximity,
+                                               distance_to_zone_percent)
 from options_scanner.technical_check import (DEFAULT_TICKERS, TechnicalCheckResult,
                                              _svg_chart, _visible_zones, check_tickers)
 from options_scanner.ibkr import ClientPortalTransport, IbkrMarketDataProvider
@@ -24,22 +25,33 @@ def render_technical_screener(results: tuple[TechnicalCheckResult, ...]) -> byte
     rows = []
     for result in results:
         zones = dict(_visible_zones(result))
-        def zone(label: str) -> str:
-            item = zones[label]
-            if item is None:
+        support, resistance = zones["S1"], zones["R1"]
+        def level(item) -> str:
+            return ('<span class="na">N/D</span>' if item is None else
+                    f'<strong>${item.lower:.2f}–${item.upper:.2f}</strong>')
+        def value(item, attribute: str) -> str:
+            return ('<span class="na">N/D</span>' if item is None else
+                    escape(str(getattr(item, attribute))))
+        def distance(item, *, proximity=False) -> str:
+            amount = distance_to_zone_percent(result.price, item) if result.price is not None else None
+            if amount is None:
                 return '<span class="na">N/D</span>'
-            return (f'<strong>${item.center:.2f}</strong><small>{escape(item.strength)} · '
-                    f'{item.contacts} contactos · {item.last_contact.isoformat()}</small>')
-        last_session = (result.context.bars[-1].session.isoformat()
-                        if result.context and result.context.bars else "N/D")
+            detail = ""
+            if proximity:
+                classification = classify_support_proximity(result.price, item)
+                detail = f'<small class="proximity">{escape(classification.value)}</small>' if classification else ""
+            return f'{amount:+.2f} %{detail}'
         state_class = " unavailable" if result.error or result.historical_status != "ok" else ""
         price = f"${result.price:.2f}" if result.price is not None else "N/D"
         rows.append(
             f'<tr data-ticker="{escape(result.symbol)}" class="{state_class.strip()}">'
             f'<th scope="row">{escape(result.symbol)}</th><td>{price}</td>'
-            f'<td>{escape(result.market_data_status if not result.error else "No disponible")}</td>'
-            + "".join(f"<td>{zone(label)}</td>" for label in ("S1", "S2", "S3", "R1", "R2"))
-            + f'<td>{result.bar_count}</td><td>{last_session}</td><td>{result.historical_seconds + result.technical_seconds:.3f} s</td>'
+            f'<td>{escape(result.market_data_status)}</td>'
+            f'<td>{level(support)}</td><td>{distance(support, proximity=True)}</td>'
+            f'<td>{value(support, "strength")}</td><td>{value(support, "contacts")}</td>'
+            f'<td>{level(resistance)}</td><td>{distance(resistance)}</td>'
+            f'<td>{value(resistance, "strength")}</td>'
+            f'<td>{result.bar_count}</td><td>{escape(result.historical_status)}</td>'
               f'<td><button class="chart-button" data-ticker="{escape(result.symbol)}" type="button">📈 Ver gráfico</button>'
               f'<div class="chart-drawer" data-chart="{escape(result.symbol)}" hidden></div></td></tr>'
         )
@@ -47,8 +59,8 @@ def render_technical_screener(results: tuple[TechnicalCheckResult, ...]) -> byte
     return f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Validación técnica</title><style>
 body{{font:14px system-ui;background:#f4f6fa;color:#182033;margin:0}}main{{max-width:1600px;margin:auto;padding:1.5rem}}a{{color:#2358d5}}.scroll{{overflow:auto}}table{{border-collapse:collapse;width:100%;background:white;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right;vertical-align:top}}th{{text-align:left;background:#263451;color:white}}thead th{{text-align:right}}thead th:first-child{{text-align:left}}small{{display:block;color:#596273}}button{{border:0;border-radius:5px;background:#2358d5;color:white;padding:.55rem;cursor:pointer}}.na,.unavailable{{color:#788190}}.chart-drawer{{position:fixed;inset:8% 5%;z-index:2;background:white;padding:1rem;box-shadow:0 5px 35px #0005;overflow:auto}}.chart-drawer svg{{width:100%;height:auto}}.chart-drawer button{{float:right}}</style></head><body><main>
 <nav><a href="/">← Scanner principal</a></nav><h1>Validación técnica multi-ticker</h1><p>Histórico 6M. Los gráficos se generan únicamente al abrir cada activo.</p>
-<div class="scroll"><table><thead><tr><th>Ticker</th><th>Precio</th><th>Estado</th><th>S1</th><th>S2</th><th>S3</th><th>R1</th><th>R2</th><th>Barras</th><th>Última sesión</th><th>Tiempo</th><th>Detalle</th></tr></thead><tbody>{body}</tbody></table></div>
-<script>document.addEventListener('click',async event=>{{const open=event.target.closest('.chart-button');if(open){{const ticker=open.dataset.ticker,drawer=document.querySelector('[data-chart="'+ticker+'"]');if(drawer.hidden){{drawer.hidden=false;drawer.innerHTML='<button type="button" class="chart-close">Cerrar</button><p>Cargando gráfico…</p>';const response=await fetch('/technical-check/chart?ticker='+encodeURIComponent(ticker));drawer.innerHTML='<button type="button" class="chart-close">Cerrar</button>'+(response.ok?await response.text():'<p>Gráfico no disponible.</p>')}}return}}const close=event.target.closest('.chart-close');if(close)close.parentElement.hidden=true}});</script>
+<div class="scroll"><table><thead><tr><th>Ticker</th><th>Precio</th><th>Estado market data</th><th>S1</th><th>Distancia a S1</th><th>Fuerza S1</th><th>Contactos S1</th><th>R1</th><th>Distancia a R1</th><th>Fuerza R1</th><th>Barras</th><th>Estado histórico</th><th>Gráfico</th></tr></thead><tbody>{body}</tbody></table></div>
+<script>document.addEventListener('click',async event=>{{const open=event.target.closest('.chart-button');if(open){{const ticker=open.dataset.ticker,drawer=document.querySelector('[data-chart="'+ticker+'"]');document.querySelectorAll('.chart-drawer').forEach(item=>{{if(item!==drawer)item.hidden=true}});if(drawer.hidden){{drawer.hidden=false;drawer.innerHTML='<button type="button" class="chart-close">Cerrar</button><p>Cargando gráfico…</p>';const response=await fetch('/technical-check/chart?ticker='+encodeURIComponent(ticker));drawer.innerHTML='<button type="button" class="chart-close">Cerrar</button>'+(response.ok?await response.text():'<p>Gráfico no disponible.</p>')}}return}}const close=event.target.closest('.chart-close');if(close)close.parentElement.hidden=true}});</script>
 </main></body></html>'''.encode()
 
 

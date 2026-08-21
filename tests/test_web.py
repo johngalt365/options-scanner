@@ -4,11 +4,15 @@ from unittest import TestCase
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
-from options_scanner.web import _interpretation, _rows, create_app, ibkr_connection_status
+from options_scanner.web import (_interpretation, _rows, create_app, ibkr_connection_status,
+                                 render_technical_screener)
 from options_scanner.historical import HistoricalBar
 from datetime import timedelta
 from options_scanner.scanner import rank_candidates
 from options_scanner.technical_analysis import PriceZone, ZoneType
+from options_scanner.technical_context import TechnicalContext
+from options_scanner.technical_check import TechnicalCheckResult
+from options_scanner.historical import HistoricalPeriod
 from datetime import date
 
 
@@ -51,6 +55,36 @@ class StatusTransport:
 
 
 class WebTest(TestCase):
+    def test_compact_rows_cover_zone_absence_history_failure_and_feed_states(self):
+        bar = HistoricalBar(date(2026, 1, 1), 100, 101, 99, 100)
+        support = PriceZone(98, 100, 99, ZoneType.SUPPORT, 4, date(2026, 1, 1), 2, "Fuerte")
+        support2 = PriceZone(90, 92, 91, ZoneType.SUPPORT, 2, date(2025, 12, 1), 3, "Media")
+        resistance = PriceZone(108, 110, 109, ZoneType.RESISTANCE, 3, date(2026, 1, 1), 2, "Media")
+        def result(symbol, supports=(), resistances=(), status="RealTime"):
+            zones = supports + resistances
+            context = TechnicalContext(symbol, HistoricalPeriod.SIX_MONTHS, (bar,), 101, zones,
+                supports, resistances, supports[0] if supports else None,
+                resistances[0] if resistances else None, None, None, ())
+            return TechnicalCheckResult(symbol, HistoricalPeriod.SIX_MONTHS, 101, context, "ok",
+                                        market_data_status=status)
+        failed = TechnicalCheckResult("FAIL", HistoricalPeriod.SIX_MONTHS, 101, None, "error",
+                                      "ValueError: history", "Delayed")
+        page = render_technical_screener((
+            result("MULTI", (support, support2), (resistance,), "Frozen"),
+            result("ONLYS1", (support,), (), "Delayed"),
+            result("NORES", (support, support2), (), "RealTime"),
+            result("NONE"), failed,
+        )).decode()
+        for state in ("Frozen", "Delayed", "RealTime"):
+            self.assertIn(state, page)
+        self.assertIn("Muy cerca", page)
+        self.assertIn("Estado histórico", page)
+        self.assertIn(">error<", page)
+        self.assertGreaterEqual(page.count("N/D"), 8)
+        self.assertEqual(page.count('class="chart-button"'), 5)
+        self.assertNotIn('<svg role="img"', page)
+        self.assertIn("querySelectorAll('.chart-drawer')", page)
+
     def test_technical_screener_is_separate_and_charts_are_lazy_and_independent(self):
         symbols = ("NVDA", "AAPL", "MSFT", "AMZN", "TSLA")
         class Provider:
