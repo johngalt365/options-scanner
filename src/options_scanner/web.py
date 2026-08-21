@@ -82,6 +82,8 @@ def render_technical_screener(results: tuple[TechnicalCheckResult, ...]) -> byte
             amount = distance_to_zone_percent(result.price, item) if result.price is not None else None
             if amount is None:
                 return '<span class="na">N/D</span>'
+            if proximity and amount == 0:
+                return 'Dentro S1<small class="proximity">Dentro de soporte</small>'
             detail = ""
             if proximity:
                 classification = classify_support_proximity(result.price, item)
@@ -169,6 +171,34 @@ def _candidate_technical_context(candidate) -> str:
         f'<div><dt>Último contacto</dt><dd>{sessions} sesiones</dd></div>'
         f'<div><dt>Distancia al límite de {escape(label)}</dt><dd>{escape(distance)}</dd></div></dl></details>'
     )
+
+
+def _strike_context_label(candidate) -> str:
+    """Return a compact, descriptive label without changing candidate ranking."""
+    label = candidate.support_position_label
+    if not label:
+        return "Sin soporte"
+    return (label.replace("Por encima de S1", "Sobre S1")
+            .replace("Por debajo de ", "Bajo ")
+            .replace("Dentro de ", "Dentro ")
+            .replace("/", "–"))
+
+
+def _strike_support_explanation(candidate) -> str:
+    """Explain the stored strike context deterministically and descriptively."""
+    zone = candidate.nearest_support_below
+    if zone is None or not candidate.support_zone_label:
+        return f"Strike ${candidate.strike:.2f} sin zona de soporte relevante disponible."
+    relation = {
+        StrikePosition.ABOVE_SUPPORT: "por encima de",
+        StrikePosition.INSIDE_SUPPORT: "dentro de",
+        StrikePosition.BELOW_SUPPORT: "por debajo de",
+    }.get(candidate.support_position, "respecto a")
+    strength = (candidate.support_strength or zone.strength).lower()
+    contacts = f", {zone.contacts} contactos" if zone.contacts is not None else ""
+    return (f"Strike ${candidate.strike:.2f} situado {relation} {candidate.support_zone_label} "
+            f"(${zone.lower:.2f}–${zone.upper:.2f}). "
+            f"{candidate.support_zone_label} {strength}{contacts}.")
 
 
 def _rows(result: ScanResult | None) -> str:
@@ -429,7 +459,8 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
     rows = []
     with_candidates = errors = 0
     elapsed = 0.0
-    sortable = {0: "text", 1: "number", 4: "number", 6: "number", 8: "number", 9: "number", 10: "number"}
+    sortable = {0: "text", 1: "number", 4: "number", 6: "number", 7: "number",
+                8: "number", 9: "number", 10: "number", 11: "number", 13: "number"}
     def badge(state: str | None) -> str:
         value = state or "N/D"
         lowered = value.lower()
@@ -439,7 +470,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
     for ticker, result, item_error in items:
         if result is None:
             errors += 1
-            cells = ((ticker, ticker), ("N/D", ""), (badge(None), "")) + tuple(("N/D", "") for _ in range(8))
+            cells = ((ticker, ticker), ("N/D", ""), (badge(None), "")) + tuple(("N/D", "") for _ in range(13))
             detail = f'<div class="row-error" role="status">{escape(item_error or "No se pudo completar este ticker.")}</div>'
             row_class = "error-result"
         else:
@@ -454,22 +485,37 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                 (f"${result.underlying_price:,.2f}" if result.underlying_price is not None else "N/D", result.underlying_price),
                 (badge(result.market_data_status), ""),
                 (f"${support.lower:.2f}–${support.upper:.2f}" if support else "N/D", support.center if support else ""),
-                (f"{distance_s:+.2f} %" if distance_s is not None else "N/D", distance_s),
+                ("Dentro S1" if distance_s == 0 else f"{distance_s:+.2f} %" if distance_s is not None else "N/D", distance_s),
                 (support.strength.capitalize() if support else "N/D", support.strength if support else ""),
                 (str(len(result.candidates)), len(result.candidates)),
                 (f"${best.strike:.2f}" if best else "N/D", best.strike if best else ""),
-                (f"{best.delta:.4f}" if best and best.delta is not None else "N/D", best.delta if best and best.delta is not None else ""),
+                (_percent(best.safety_margin) if best else "N/D", best.safety_margin if best else ""),
+                (f"{abs(best.delta):.4f}" if best and best.delta is not None else "N/D", abs(best.delta) if best and best.delta is not None else ""),
                 (f"{best.premium_yield*100:.2f} %" if best and best.premium_yield is not None else "N/D", best.premium_yield if best and best.premium_yield is not None else ""),
                 (f"{best.annualized_premium_yield*100:.2f} %" if best and best.annualized_premium_yield is not None else "N/D", best.annualized_premium_yield if best and best.annualized_premium_yield is not None else ""),
+                (_strike_context_label(best) if best else "N/D", _strike_context_label(best) if best else ""),
+                (f"{best.distance_to_support_pct:+.2f} %" if best and best.distance_to_support_pct is not None else "N/D", best.distance_to_support_pct if best and best.distance_to_support_pct is not None else ""),
+                ((best.support_strength or best.nearest_support_below.strength).capitalize()
+                 if best and best.nearest_support_below else "N/D",
+                 (best.support_strength or best.nearest_support_below.strength) if best and best.nearest_support_below else ""),
+                (str(best.nearest_support_below.contacts) if best and best.nearest_support_below and best.nearest_support_below.contacts is not None else "N/D",
+                 best.nearest_support_below.contacts if best and best.nearest_support_below and best.nearest_support_below.contacts is not None else ""),
             )
             detail = (_result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
+                      (f'<p class="strike-explanation">{escape(_strike_support_explanation(best))}</p>' if best else '') +
                       '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
                       ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico')) +
                       f'</tr></thead><tbody>{_rows(result)}</tbody></table></div>{_summary(result)}')
-            row_class = "has-candidates" if best else "no-candidates"
+            relation_class = ({StrikePosition.ABOVE_SUPPORT: " strike-above",
+                               StrikePosition.INSIDE_SUPPORT: " strike-inside",
+                               StrikePosition.BELOW_SUPPORT: " strike-below"}
+                              .get(best.support_position, "") if best else "")
+            row_class = ("has-candidates" + relation_class) if best else "no-candidates"
         rendered = ''.join(f'<td data-sort-value="{escape(str(sort_value if sort_value is not None else ""))}">{value}</td>' for value, sort_value in cells)
         rows.append(f'<tr data-ticker="{escape(ticker)}" class="{row_class}">{rendered}<td><details class="ticker-detail"><summary>Ver detalle</summary><div class="detail-panel"><button type="button" class="detail-close" aria-label="Cerrar detalle">Cerrar</button>{detail}</div></details></td></tr>')
-    headings = ('Ticker','Precio','Estado','S1','Distancia S1','Fuerza S1','Candidatos','Mejor strike','Delta','Premium yield','Annualized yield')
+    headings = ('Ticker','Precio','Estado','S1','Distancia S1','Fuerza S1','Candidatos',
+                'Mejor strike','Safety margin','Delta','Premium yield','Annualized yield',
+                'Contexto strike','Distancia strike–soporte','Fuerza zona','Contactos')
     headers = []
     for i, heading in enumerate(headings):
         content = heading
@@ -485,7 +531,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
               if metrics else f' · {elapsed:.1f} s')
     return ('<section class="screener" aria-labelledby="screener-title"><h2 id="screener-title">Screener multi-ticker</h2>'
             f'<div class="scan-summary" role="status">{total} tickers · {with_candidates} con candidatos · {total-with_candidates-errors} sin candidatos{timing} · {errors} error</div>'
-            '<div class="quick-filters" role="group" aria-label="Filtros rápidos"><button type="button" class="active" data-filter="all">Todos</button><button type="button" data-filter="has-candidates">Con candidatos</button><button type="button" data-filter="no-candidates">Sin candidatos</button><button type="button" data-filter="strong">Soporte fuerte</button><button type="button" data-filter="near">Cerca de S1</button></div>'
+            '<div class="quick-filters" role="group" aria-label="Filtros rápidos"><button type="button" class="active" data-filter="all">Todos</button><button type="button" data-filter="has-candidates">Con candidatos</button><button type="button" data-filter="no-candidates">Sin candidatos</button><button type="button" data-filter="strong">Soporte fuerte</button><button type="button" data-filter="near">Cerca de S1</button><button type="button" data-filter="strike-above">Strike sobre soporte</button><button type="button" data-filter="strike-inside">Strike dentro soporte</button><button type="button" data-filter="strike-below">Strike bajo soporte</button></div>'
             '<div class="scroll"><table class="screener-table"><thead><tr>' + rendered_headers + '<th>Acción</th>' +
             '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></section>')
 
