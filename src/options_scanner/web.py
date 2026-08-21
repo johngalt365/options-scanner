@@ -245,7 +245,7 @@ def _evaluation_detail(candidate) -> str:
             f'<p><strong>Debilidades:</strong> {escape(weaknesses)}.</p>{missing}</details>')
 
 
-def _evaluation_section(candidate) -> str:
+def _evaluation_section(candidate, complete_count: int) -> str:
     """Render the evaluation already attached to the selected candidate."""
     if candidate is None or candidate.evaluation is None:
         return ""
@@ -253,9 +253,16 @@ def _evaluation_section(candidate) -> str:
     strengths = "; ".join(e.strengths) or "Sin fortalezas destacadas por las reglas v1"
     weaknesses = "; ".join(e.weaknesses) or "Sin debilidades destacadas por las reglas v1"
     missing = ", ".join(e.missing_data) or "Ninguno"
+    month = ("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")[
+        candidate.expiration.month - 1
+    ]
+    plural = "s" if complete_count != 1 else ""
+    contract_count = f"{complete_count} contrato{plural} completo{plural}"
     return (
         '<section class="short-put-evaluation" aria-labelledby="short-put-evaluation-title">'
-        '<h2 id="short-put-evaluation-title">Evaluación Short PUT</h2>'
+        f'<h2 id="short-put-evaluation-title">Evaluación Short PUT — {escape(candidate.ticker)} · '
+        f'PUT ${candidate.strike:g} · {candidate.expiration.day} {month} {candidate.expiration.year} · {candidate.dte} DTE</h2>'
+        f'<p class="evaluation-winner">Mejor candidato de {contract_count}</p>'
         '<dl class="evaluation-scores">'
         f'<div><dt>Riesgo</dt><dd>{e.risk_score:.2f}/30</dd></div>'
         f'<div><dt>Técnico</dt><dd>{e.technical_score:.2f}/25</dd></div>'
@@ -283,7 +290,10 @@ def _rows(result: ScanResult | None) -> str:
         if "Frozen" in str(c.market_data_availability):
             availability = f'<span class="market-state frozen">{availability}</span><small class="market-note">Cotización congelada / última disponible</small>'
         cells = (
-            _number(c.ticker), _number(c.expiration.isoformat()), _number(c.dte), _number(c.strike, 4),
+            _number(c.ticker),
+            _number(c.evaluation.total_score if c.evaluation else None),
+            escape(c.evaluation.label) if c.evaluation else '<span class="na">N/D</span>',
+            _number(c.expiration.isoformat()), _number(c.dte), _number(c.strike, 4),
             f"${c.underlying_price:,.2f}", _percent(c.safety_margin), _number(c.bid, 4),
             _number(c.ask, 4), _number(c.mid, 4), _number(c.delta, 4), _number(c.gamma, 4),
             _number(c.contract_theta, 4), _number(c.short_theta, 4), _number(c.theta_decay_pct_per_day, 2),
@@ -291,8 +301,6 @@ def _rows(result: ScanResult | None) -> str:
             _number(c.open_interest), availability, _percent(c.premium_yield),
             _percent(c.annualized_premium_yield),
             _percent(c.relative_spread),
-            _number(c.evaluation.total_score if c.evaluation else None),
-            escape(c.evaluation.label) if c.evaluation else '<span class="na">N/D</span>',
             _evaluation_detail(c),
             _candidate_technical_context(c, result.technical_context),
         )
@@ -658,10 +666,10 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                   _strike_context_label(best) if best else "")),
             )
             detail = (_result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
-                      _evaluation_section(best) +
+                      _evaluation_section(best, len(result.candidates)) +
                       (f'<p class="strike-explanation">{escape(_strike_support_explanation(best, context))}</p>' if best else '') +
                       '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
-                      ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Score','Evaluación','Desglose','Contexto técnico')) +
+                      ''.join(f'<th>{h}</th>' for h in ('Ticker','Score','Evaluación','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Desglose','Contexto técnico')) +
                       f'</tr></thead><tbody>{_rows(result)}</tbody></table></div>{_summary(result)}')
             if best and multi_mode and context:
                 relation_class = {
@@ -732,7 +740,7 @@ def render_page(values: dict[str, str] | None = None, result: ScanResult | None 
         <button name="action" value="watchlist_delete" type="submit" class="danger">Eliminar</button></form>'''
         for item in (watchlists or {}).values()
     )
-    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}{_evaluation_section(result.candidates[0] if result.candidates else None)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Score','Evaluación','Desglose','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
+    table = _multi_screener(multi_results, multi_metrics) if multi_results else ("" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}{_evaluation_section(result.candidates[0] if result.candidates else None, len(result.candidates))}<h2>Candidatos PUT completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Score','Evaluación','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Spread relativo','Desglose','Contexto técnico'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>''')
     def help_icon(identifier: str, title: str, explanation: str) -> str:
         """Return an accessible, layout-independent educational tooltip."""
         return (f'<span class="filter-help"><button class="help-trigger" type="button" '
