@@ -4,7 +4,7 @@ from unittest import TestCase
 from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
-from options_scanner.web import create_app
+from options_scanner.web import create_app, ibkr_connection_status
 from datetime import date
 
 
@@ -35,6 +35,17 @@ class StubService:
         return self.result
 
 
+class StatusTransport:
+    def __init__(self, payload=None, error=None):
+        self.payload, self.error, self.calls = payload, error, []
+
+    def get(self, path, params):
+        self.calls.append((path, params))
+        if self.error:
+            raise self.error
+        return self.payload
+
+
 class WebTest(TestCase):
     def test_get_renders_form_defaults_and_demo_mode(self):
         status, page = request(create_app(StubService()))
@@ -42,6 +53,35 @@ class WebTest(TestCase):
         for value in ('value="NVDA"', 'value="30"', 'value="45"', 'value="20"',
                       'value="0.15"', 'value="0.30"', "Modo demostración", "Scan"):
             self.assertIn(value, page)
+        self.assertIn("Actualizar estado", page)
+        self.assertIn("Datos simulados — no proceden de Interactive Brokers", page)
+        self.assertIn("Modo demostración", page)
+
+    def test_four_connection_states_are_safe_and_accessible(self):
+        cases = (
+            ({"authenticated": True, "connected": True}, None, "connected", "IBKR conectado"),
+            ({"authenticated": False, "connected": True}, None, "login", "IBKR requiere login"),
+            (None, RuntimeError("account=SECRET cookie=SECRET"), "disconnected", "IBKR desconectado"),
+        )
+        for payload, error, state, text in cases:
+            with self.subTest(state=state):
+                result = ibkr_connection_status(StatusTransport(payload, error))
+                self.assertEqual((result["state"], result["text"]), (state, text))
+                self.assertNotIn("SECRET", str(result))
+        _, page = request(create_app(StubService()))
+        self.assertIn("connection demo", page)
+        self.assertIn("La conexión IBKR no es necesaria", page)
+
+    def test_status_endpoint_uses_read_only_auth_check(self):
+        transport = StatusTransport({"authenticated": True, "connected": True, "accountId": "SECRET"})
+        app = create_app(StubService(), status_transport=transport)
+        captured = {}
+        environ = {"PATH_INFO": "/ibkr-status", "REQUEST_METHOD": "GET", "wsgi.input": BytesIO()}
+        body = b"".join(app(environ, lambda status, headers: captured.update(status=status))).decode()
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertEqual(transport.calls, [("/iserver/auth/status", {})])
+        self.assertIn("IBKR conectado", body)
+        self.assertNotIn("SECRET", body)
 
     def test_demo_post_and_empty_result_are_rendered(self):
         service = StubService()
@@ -63,6 +103,8 @@ class WebTest(TestCase):
         self.assertIn("20.00 %", page)
         self.assertIn("RpB (RealTime)", page)
         self.assertIn("N/D", page)
+        self.assertIn("$100.00", page)
+        self.assertIn("Detalles técnicos", page)
 
     def test_invalid_parameters_are_safe(self):
         status, page = request(create_app(StubService()), "POST", FORM.replace("min_dte=30", "min_dte=x"))
@@ -85,4 +127,5 @@ class WebTest(TestCase):
     def test_post_preserves_escaped_input(self):
         status, page = request(create_app(StubService()), "POST", FORM.replace("NVDA", "%3Cscript%3E"))
         self.assertEqual(status, "400 Bad Request")
-        self.assertNotIn("<script>", page)
+        self.assertIn('value="&lt;script&gt;"', page)
+        self.assertNotIn('value="<script>"', page)

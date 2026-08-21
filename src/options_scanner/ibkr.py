@@ -224,6 +224,7 @@ class IbkrMarketDataProvider:
         self._contract_cache: dict[tuple[str, str, date, float], tuple[ConfirmedOptionContract, ...]] = {}
         self._contract_cache_lock = threading.Lock()
         self.http_call_counts: Counter[str] = Counter()
+        self.last_underlying: Underlying | None = None
 
     def _get(self, path: str, params: Mapping[str, str]) -> Any:
         """Count safe endpoint names while leaving request details private."""
@@ -284,7 +285,9 @@ class IbkrMarketDataProvider:
         """Resolve a stock and obtain its price through the canonical snapshot flow."""
 
         conid, months = self.locate_stock(symbol)
-        return self.get_underlying_by_conid(symbol, conid, deadline=deadline), conid, months
+        underlying = self.get_underlying_by_conid(symbol, conid, deadline=deadline)
+        self.last_underlying = underlying
+        return underlying, conid, months
 
     def get_put_strikes(self, conid: str, expiration: date) -> tuple[float, ...]:
         self._require_derivative_search(conid)

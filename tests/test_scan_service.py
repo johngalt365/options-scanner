@@ -35,3 +35,7 @@ class ScanRequestTest(TestCase):
         service = PutScanService(today=lambda: date(2026, 8, 20))
         result = service.run(ScanRequest(fake=True, min_abs_delta=.9, max_abs_delta=1))
         self.assertEqual(result.candidates, ())
+        self.assertEqual(result.underlying_price, 100.0)
+        self.assertEqual(result.market_data_status, "Simulado")
+        self.assertTrue(result.simulated)
+        self.assertIsNotNone(result.updated_at)
