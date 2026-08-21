@@ -106,6 +106,12 @@ class PutScanService:
         self._today = today
         self._clock = clock
 
+    def run_universe(self, tickers: tuple[str, ...], request: ScanRequest, **kwargs) -> tuple[ScanResult, ...]:
+        """Scan an already-normalized universe without knowing where it came from."""
+        if not tickers:
+            raise ValueError("El universo no puede estar vacío.")
+        return tuple(self.run(replace(request, ticker=ticker), **kwargs) for ticker in tickers)
+
     def run(
         self, request: ScanRequest, *, base_url: str = "https://localhost:5000/v1/api",
         allow_insecure_tls: bool = False, scan_timeout: float = 30.0,

@@ -17,6 +17,7 @@ src/options_scanner/
 ├── ibkr.py         # adaptador IBKR y transporte HTTP inyectable
 ├── ibkr_diagnostic.py # diagnóstico CLI de Client Portal Gateway
 ├── workspace.py    # espacios en memoria aislados por usuario
+├── universe.py     # selección y normalización de universos de tickers
 └── brokers.py      # puertos futuros de conexión por usuario
 ```
 
@@ -40,6 +41,17 @@ propietario explícito. `UserWorkspaceStore` mantiene espacios separados en
 memoria. Los datos de mercado son deliberadamente globales y todavía no están
 asociados a usuarios ni cuentas. Los perfiles futuros de broker sí pertenecen
 a un usuario, pero esta fase no abre sesiones ni guarda credenciales.
+
+## Universos de tickers
+
+La web permite elegir exactamente una fuente por scan: un grupo predefinido
+configurable, una watchlist del usuario o una lista manual temporal separada
+por comas o espacios. Antes de escanear muestra la lista final; los símbolos se
+convierten a mayúsculas, se validan y se eliminan duplicados conservando su
+primer orden. Una lista manual puede guardarse como watchlist en el
+`UserWorkspaceStore`; sigue siendo almacenamiento efímero y no usa base de
+datos. El caso de uso del scanner recibe únicamente la tupla final normalizada,
+sin depender del origen seleccionado.
 
 ## Reglas por defecto
 
