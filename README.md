@@ -345,3 +345,19 @@ mantiene los modelos internos independientes del payload de IBKR.
 
 Las zonas se derivan del comportamiento histórico del precio y no garantizan
 reacciones futuras. No constituyen una recomendación de inversión.
+
+## Mapa técnico informativo
+
+El análisis histórico conserva todas las zonas detectadas y expone los soportes activos por debajo del precio (`supports_below_price`, de S1 hacia abajo) y las resistencias activas por encima (`resistances_above_price`, de R1 hacia arriba). La interfaz limita deliberadamente el resumen y el SVG a **S1–S3 y R1–R2** para mantenerlos legibles; esto no cambia los filtros ni el ranking de PUTs.
+
+Ejemplo obtenido con una serie sintética/demo (los niveles varían con la serie):
+
+```text
+Precio actual: $105.00
+S1  $101.50–$102.50  -2.86 %  Media   3 contactos  último contacto 8 sesiones
+S2  $94.40–$95.60    -9.52 %  Fuerte  5 contactos  último contacto 31 sesiones
+R1  $109.30–$110.70  +4.76 %  Media   2 contactos  último contacto 4 sesiones
+Strike $100: BELOW_SUPPORT respecto de S1 y por encima de S2
+```
+
+Cada candidato puede incluir de forma opcional su soporte relevante, posición (`ABOVE_SUPPORT`, `INSIDE_SUPPORT` o `BELOW_SUPPORT`), distancia porcentual y fuerza. Estos campos son exclusivamente descriptivos: no filtran contratos, no alteran yields y no intervienen en el orden del ranking.

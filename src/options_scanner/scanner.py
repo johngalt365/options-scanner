@@ -3,6 +3,10 @@
 from dataclasses import dataclass
 from datetime import date
 from typing import Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from options_scanner.technical_analysis import PriceZone
 
 from options_scanner.filters import filter_put_candidates, safety_margin
 from options_scanner.market_data import MarketDataProvider
@@ -26,6 +30,10 @@ class PutScanCandidate:
     implied_volatility: float | None
     open_interest: int | None
     market_data_availability: str | None
+    nearest_support_below: "PriceZone | None" = None
+    support_position: str | None = None
+    distance_to_support_pct: float | None = None
+    support_strength: str | None = None
 
     @property
     def mid(self) -> float | None:
