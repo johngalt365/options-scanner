@@ -378,3 +378,21 @@ Strike $100: BELOW_SUPPORT respecto de S1 y por encima de S2
 ```
 
 Cada candidato puede incluir de forma opcional su soporte relevante, posición (`ABOVE_SUPPORT`, `INSIDE_SUPPORT` o `BELOW_SUPPORT`), distancia porcentual y fuerza. Estos campos son exclusivamente descriptivos: no filtran contratos, no alteran yields y no intervienen en el orden del ranking.
+
+## Validación técnica multi-ticker
+
+El diagnóstico técnico permite comparar los mismos pivotes, ATR, clustering y
+score entre varios activos sin ejecutar el scanner de opciones:
+
+```bash
+PYTHONPATH=src python -m options_scanner.technical_check \
+  --tickers NVDA,AAPL,MSFT,AMZN,TSLA --period 6M --insecure-tls
+```
+
+La tabla muestra precio, S1–S3/R1–R2, fuerza, contactos, último contacto,
+número de barras y estado del histórico. Cada ticker se procesa de forma
+aislada: si falla su precio o histórico, el diagnóstico conserva el error y
+continúa con los demás. Para generar un informe visual bajo demanda, añade
+`--charts technical-check.html`; el HTML deja todos los gráficos colapsados por
+defecto. Este flujo solo resuelve el subyacente y su histórico diario, y no
+descubre ni solicita contratos de opciones.
