@@ -72,6 +72,23 @@ python -m pip install -e .
 python -m options_scanner.web
 ```
 
+### Desarrollo local
+
+Con un entorno virtual ya creado en `.venv`, se puede iniciar la versión actual
+desde cualquier directorio con:
+
+```bash
+./run_web.sh
+```
+
+El script activa `.venv`, detiene de forma segura una instancia anterior que
+esté escuchando en `127.0.0.1:8000` y arranca la interfaz actual. El comando
+manual continúa disponible:
+
+```bash
+PYTHONPATH=src python -m options_scanner.web
+```
+
 Abre exactamente <http://127.0.0.1:8000/>. El formulario comienza en **modo
 demostración**, que usa el proveedor fake y no requiere IBKR. Para datos reales,
 desmarca «Modo demostración», inicia Client Portal Gateway por separado en
