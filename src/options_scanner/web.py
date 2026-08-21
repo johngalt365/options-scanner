@@ -10,6 +10,8 @@ from wsgiref.simple_server import make_server
 
 from options_scanner.ibkr import GatewayUnavailableError, IbkrError, NotAuthenticatedError
 from options_scanner.scan_service import PutScanService, ScanRequest, ScanResult
+from options_scanner.historical import HistoricalPeriod
+from options_scanner.technical_context import StrikePosition
 
 logger = logging.getLogger(__name__)
 
@@ -185,22 +187,47 @@ def _result_heading(result: ScanResult | None, ticker: str) -> str:
     return f'<div class="result-head"><strong>{escape(ticker.upper())} &nbsp; {price}</strong><span>{status} · Actualizado {updated}{simulated}</span></div>'
 
 
+def _technical_chart(result: ScanResult | None) -> str:
+    context = result.technical_context if result else None
+    if context is None or not context.bars:
+        return ""
+    bars=context.bars; width,height,pad=1000,360,38
+    prices=[value for b in bars for value in (b.low,b.high)]+[context.current_price]
+    for zone in context.zones: prices.extend((zone.lower,zone.upper))
+    low,high=min(prices),max(prices); span=max(high-low,1e-9)
+    x=lambda i: pad+i*(width-2*pad)/max(1,len(bars)-1)
+    y=lambda price: pad+(high-price)*(height-2*pad)/span
+    zones="".join(f'<rect class="zone {z.kind.value}{" broken" if z.broken else ""}" x="{pad}" y="{y(z.upper):.1f}" width="{width-2*pad}" height="{max(2,y(z.lower)-y(z.upper)):.1f}"><title>{z.kind.value}: ${z.lower:.2f}–${z.upper:.2f}; {z.contacts} contactos; score {z.score:.1f}</title></rect>' for z in context.zones)
+    path=" ".join(("M" if i==0 else "L")+f"{x(i):.1f},{y(b.close):.1f}" for i,b in enumerate(bars))
+    strike_lines="".join(f'<line class="strike" x1="{pad}" x2="{width-pad}" y1="{y(s.strike):.1f}" y2="{y(s.strike):.1f}"><title>Strike ${s.strike:.2f}</title></line>' for s in context.strikes)
+    current_y=y(context.current_price)
+    def zone_message(label,zone):
+        if not zone:return f"<p>{label}: no disponible</p>"
+        sessions=sum(1 for b in bars if b.session>zone.last_contact)
+        return f"<p>{label}: <strong>${zone.lower:.2f}–${zone.upper:.2f}</strong> · Último contacto: hace {sessions} sesiones · Fuerza: {zone.strength}</p>"
+    names={StrikePosition.ABOVE:"por encima de la zona de soporte principal",StrikePosition.INSIDE:"dentro de la zona de soporte",StrikePosition.BELOW:"por debajo de la zona de soporte principal"}
+    strike_messages="".join(f"<li>Strike ${s.strike:.2f}: {names.get(s.position,'sin soporte activo cercano')}</li>" for s in context.strikes)
+    return f'''<section class="technical"><div class="technical-title"><div><h2>Histórico diario de {escape(context.symbol)}</h2><span>Precio actual: ${context.current_price:.2f} · Última sesión disponible: {bars[-1].session.isoformat()}</span></div></div><svg role="img" aria-label="Gráfico histórico diario con zonas de soporte, resistencia, precio actual y strikes" viewBox="0 0 {width} {height}" preserveAspectRatio="none">{zones}<path class="price" d="{path}"/><line class="current" x1="{pad}" x2="{width-pad}" y1="{current_y:.1f}" y2="{current_y:.1f}"/>{strike_lines}</svg><div class="technical-context"><h3>Contexto técnico</h3>{zone_message('Soporte activo más cercano',context.nearest_support)}{zone_message('Resistencia activa más cercana',context.nearest_resistance)}<ul>{strike_messages}</ul><p class="disclaimer">Las zonas se derivan del comportamiento histórico del precio y no garantizan reacciones futuras. No constituyen una recomendación de inversión.</p></div></section>'''
+
+
 def render_page(values: dict[str, str] | None = None, result: ScanResult | None = None, error: str | None = None) -> bytes:
     v = {"ticker": "NVDA", "min_dte": "30", "max_dte": "45", "min_safety_margin": "20",
-         "min_abs_delta": "0.15", "max_abs_delta": "0.30", "mode": "fake"}
+         "min_abs_delta": "0.15", "max_abs_delta": "0.30", "mode": "fake", "historical_period":"6m"}
     if values:
         v.update(values)
     checked = " checked" if v["mode"] == "fake" else ""
     alert = f'<div class="error" role="alert">{escape(error)}</div>' if error else ""
-    table = "" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>'''
+    table = "" if result is None else f'''<section>{_result_heading(result, v['ticker'])}{_technical_chart(result)}{_interpretation(result)}<h2>Candidatos completos</h2><div class="scroll"><table><thead><tr>{''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Safety margin','Bid','Ask','Mid','Delta','Gamma','Theta','Vega','IV','Open interest','6509','Premium yield','Annualized yield'))}</tr></thead><tbody>{_rows(result)}</tbody></table></div></section>'''
     html = f'''<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Options Scanner</title><style>
 body{{font:15px system-ui;margin:0;background:#f4f6fa;color:#182033}}main{{max-width:1500px;margin:auto;padding:2rem}}h1{{margin:0}}.note{{color:#556}}.top{{display:flex;justify-content:space-between;gap:1rem;align-items:start}}.connection{{background:white;padding:.7rem;border-radius:8px;min-width:220px}}.dot{{display:inline-block;width:.75rem;height:.75rem;border-radius:50%;background:#818895;margin-right:.4rem}}.connected .dot{{background:#198754}}.login .dot{{background:#e58a00}}.disconnected .dot{{background:#c52d36}}.demo .dot{{background:#818895}}.connection button{{font-size:.8rem;padding:.35rem .6rem;margin-top:.4rem}}.connection small{{display:block;color:#596273;margin-top:.25rem}}
 form{{display:flex;flex-wrap:wrap;gap:1rem;align-items:end;background:white;padding:1.25rem;border-radius:10px;box-shadow:0 2px 8px #0001}}label{{display:grid;gap:.35rem;font-weight:600}}input{{padding:.55rem;border:1px solid #aab3c5;border-radius:5px;width:9rem}}button{{background:#2358d5;color:white;border:0;border-radius:5px;padding:.7rem 1.4rem;font-weight:700;cursor:pointer}}button:disabled{{cursor:not-allowed;opacity:.65}}.mode{{display:flex;align-items:center;gap:.4rem}}.mode input{{width:auto}}
 .interpretation{{background:white;padding:1rem 1.2rem;border-radius:8px;border-left:4px solid #60708c;margin-top:1rem}}.interpretation h2{{margin-top:0}}.interpretation-message{{margin:.45rem 0;padding:.45rem .65rem;border-radius:4px}}.interpretation-message.success{{background:#e9f7ef;border-left:3px solid #198754}}.interpretation-message.neutral{{background:#eef3fb;border-left:3px solid #60708c}}.interpretation-message.warning{{background:#fff7db;border-left:3px solid #d18a00}}.interpretation-message.error{{background:#fff0f0;border-left:3px solid #c22}}.interpretation ul{{margin-bottom:0}}.interpretation dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem}}.interpretation dl div{{background:#f4f6fa;padding:.65rem;border-radius:5px}}
+.technical{{background:white;padding:1rem;border-radius:8px}}.technical svg{{width:100%;height:360px;background:#fafbfd;border:1px solid #dce2ec}}.price{{fill:none;stroke:#254fbd;stroke-width:2}}.zone.support{{fill:#2ca66f22}}.zone.resistance{{fill:#db5a5522}}.zone.broken{{opacity:.3}}.current{{stroke:#182033;stroke-width:1.5;stroke-dasharray:7 4}}.strike{{stroke:#8b55bb;stroke-width:1;stroke-dasharray:3 4}}.technical-context{{background:#f6f8fb;padding:.8rem 1rem;margin-top:.7rem}}.technical-context h3{{margin-top:0}}.disclaimer{{color:#596273;font-size:.9rem}}
 .scan-status{{display:flex;align-items:center;gap:.8rem;margin:1rem 0;padding:1rem;background:#eaf1ff;border-left:4px solid #2358d5;border-radius:5px}}.scan-status[hidden]{{display:none}}.scan-status strong,.scan-status span{{display:block}}.spinner{{width:1.25rem;height:1.25rem;border:3px solid #b9c9ed;border-top-color:#2358d5;border-radius:50%;animation:spin .8s linear infinite;flex:none}}@keyframes spin{{to{{transform:rotate(360deg)}}}}.completion{{margin:1rem 0;padding:.8rem;background:#e9f7ef;border-left:4px solid #198754}}.error{{margin:1rem 0;padding:1rem;background:#fff0f0;border-left:4px solid #c22}}.demo-label{{background:#eceff3;padding:.65rem;border-left:4px solid #818895;font-weight:700}}section{{margin-top:1.5rem}}.result-head{{background:white;padding:1rem;border-radius:8px;display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap}}.result-head strong{{font-size:1.7rem}}.market-state{{font-weight:700}}.market-state.frozen{{color:#6b5200;background:#fff2bd;border-radius:4px;padding:.15rem .35rem}}.market-note{{display:block;color:#665b38;font-weight:400;white-space:normal}}.scroll{{overflow:auto}}table{{border-collapse:collapse;background:white;width:100%;white-space:nowrap}}th,td{{padding:.65rem;border-bottom:1px solid #dde2ea;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{background:#263451;color:white}}.na,.empty{{color:#788190;font-style:italic}}.summary dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.75rem}}.summary dl div{{background:white;padding:.8rem;border-radius:7px}}dt{{color:#596273}}dd{{font-size:1.15rem;font-weight:700;margin:.25rem 0 0}}details{{margin-top:1rem}}summary{{cursor:pointer;font-weight:700}}
 </style></head><body><main><div class="top"><div><h1>PUT Options Scanner</h1><p class="note">Análisis local de solo lectura. No ejecuta ni ofrece operaciones de trading.</p></div><div id="connection" class="connection"><span class="dot"></span><strong>Comprobando IBKR…</strong><small>Comprobación no bloqueante.</small><button type="button" id="refresh-status">Actualizar estado</button></div></div><form method="post">
 <label>Ticker<input name="ticker" value="{escape(v['ticker'])}" required></label><label>Min DTE<input type="number" name="min_dte" min="0" value="{escape(v['min_dte'])}" required></label><label>Max DTE<input type="number" name="max_dte" min="0" value="{escape(v['max_dte'])}" required></label>
 <label>Margen mínimo (%)<input type="number" name="min_safety_margin" min="0" max="100" step="0.01" value="{escape(v['min_safety_margin'])}" required></label><label>|Delta| mínima<input type="number" name="min_abs_delta" min="0" max="1" step="0.01" value="{escape(v['min_abs_delta'])}" required></label><label>|Delta| máxima<input type="number" name="max_abs_delta" min="0" max="1" step="0.01" value="{escape(v['max_abs_delta'])}" required></label>
+<label>Histórico<select name="historical_period"><option value="3m"{' selected' if v['historical_period']=='3m' else ''}>3M</option><option value="6m"{' selected' if v['historical_period']=='6m' else ''}>6M</option><option value="1y"{' selected' if v['historical_period']=='1y' else ''}>1A</option></select></label>
 <label class="mode"><input id="fake-mode" type="checkbox" name="fake" value="1"{checked}> Modo demostración</label><button id="scan-button" type="submit">Scan</button></form><p id="demo-label" class="demo-label"{' hidden' if not checked else ''}>Datos simulados — no proceden de Interactive Brokers</p><div id="scan-status" class="scan-status" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><div><strong id="scan-title"></strong><span id="scan-source"></span><span>Tiempo transcurrido: <b id="scan-timer">00:00</b></span></div></div><div id="scan-output" aria-live="polite">{alert}{table}{_summary(result)}</div><script>
 const box=document.querySelector('#connection'),fake=document.querySelector('#fake-mode'),label=document.querySelector('#demo-label'),form=document.querySelector('form'),scanButton=document.querySelector('#scan-button'),scanStatus=document.querySelector('#scan-status'),scanOutput=document.querySelector('#scan-output'),timer=document.querySelector('#scan-timer');let scanning=false,interval;
 function elapsed(seconds){{const value=Math.floor(seconds);return String(Math.floor(value/60)).padStart(2,'0')+':'+String(value%60).padStart(2,'0')}}
@@ -240,6 +267,7 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                     min_safety_margin=float(values.get("min_safety_margin", "")) / 100,
                     min_abs_delta=float(values.get("min_abs_delta", "")),
                     max_abs_delta=float(values.get("max_abs_delta", "")), fake=values["mode"] == "fake",
+                    historical_period=HistoricalPeriod(values.get("historical_period", "6m")),
                 )
                 result = scanner.run(request, base_url=base_url, allow_insecure_tls=True)
             except (ValueError, KeyError):

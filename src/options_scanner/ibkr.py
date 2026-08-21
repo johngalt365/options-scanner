@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from options_scanner.models import MarketData, OptionContract, OptionType, Underlying
+from options_scanner.historical import HistoricalBar, HistoricalPeriod, IbkrHistoricalDataProvider
 
 
 logger = logging.getLogger(__name__)
@@ -245,6 +246,13 @@ class IbkrMarketDataProvider:
         data = self._get("/iserver/auth/status", {})
         if not isinstance(data, Mapping) or not data.get("authenticated"):
             raise NotAuthenticatedError("Client Portal Gateway está disponible, pero la sesión no está autenticada")
+
+    def get_historical_bars(
+        self, symbol: str, period: HistoricalPeriod = HistoricalPeriod.SIX_MONTHS
+    ) -> tuple[HistoricalBar, ...]:
+        """Return provider-neutral daily bars using this provider's Gateway session."""
+        adapter = IbkrHistoricalDataProvider(self._transport, lambda value: self.locate_stock(value)[0])
+        return adapter.get_historical_bars(symbol, period)
 
     def locate_stock(self, symbol: str) -> tuple[str, tuple[date, ...]]:
         data = self._get("/iserver/secdef/search", {"symbol": symbol.upper(), "secType": "STK"})
