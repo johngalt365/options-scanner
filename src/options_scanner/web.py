@@ -65,7 +65,7 @@ def _summary(result: ScanResult | None) -> str:
     s = result.summary
     phase = s.phase_seconds
     items = (
-        ("Considerados", s.considered), ("Completos", s.complete),
+        ("Considerados (evaluados con market data/filtros)", s.considered), ("Completos", s.complete),
         ("Rechazados por margen", s.rejected_margin), ("Rechazados por delta", s.rejected_delta),
         ("Tiempo total", f"{result.elapsed_seconds:.3f} s"),
     )
@@ -76,6 +76,12 @@ def _summary(result: ScanResult | None) -> str:
         ("Timeout", "Sí" if s.timed_out else "No"), ("Fase", s.timeout_phase or "—"),
         ("Resolución contractual", f"{phase.get('contract_resolution', 0):.3f} s"),
         ("Market data", f"{phase.get('market_data_snapshots', 0):.3f} s"),
+        ("Strikes candidatos", s.candidate_strikes), ("Llamadas secdef/info", s.secdef_info_calls),
+        ("Cache hits", s.contract_cache_hits), ("Deduplicados", s.deduplicated_contracts),
+        ("Validaciones correctas", s.contract_validations_succeeded),
+        ("Validaciones fallidas", s.contract_validations_failed),
+        ("Latencia secdef/info media/p50/p95", f"{s.secdef_info_latency_mean_ms:.1f}/{s.secdef_info_latency_p50_ms:.1f}/{s.secdef_info_latency_p95_ms:.1f} ms"),
+        ("Concurrencia máxima observada", s.max_concurrent_contract_requests),
     )
     cards = "".join(
         f"<div><dt>{escape(label)}</dt><dd>{escape(str(value))}</dd></div>" for label, value in items
@@ -110,6 +116,8 @@ def _interpretation(result: ScanResult | None) -> str:
         ))
         messages.append((
             "warning",
+            f"Se evaluaron {summary.considered} contratos de {summary.target_contracts} objetivos antes de agotarse el tiempo de resolución."
+            if summary.timeout_phase == "contract_resolution" else
             f"{summary.unresolved_contracts_timeout} contratos quedaron pendientes.",
         ))
     if result.market_data_status and "Frozen" in result.market_data_status:

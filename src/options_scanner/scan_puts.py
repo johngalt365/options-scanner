@@ -32,7 +32,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--fake", action="store_true", help="usa datos deterministas sin conectar a IBKR")
     parser.add_argument("--batch-size", type=int, default=50)
     parser.add_argument("--snapshot-attempts", type=int, default=2)
-    parser.add_argument("--contract-workers", type=int, default=4,
+    parser.add_argument("--contract-workers", type=int, default=8,
                         help="máximo de secdef/info simultáneos (máximo de seguridad: 16)")
     parser.add_argument("--scan-timeout", type=float, default=30.0, help="límite global en segundos")
     parser.add_argument("--market-data-timeout", type=float, default=10.0,
@@ -56,6 +56,15 @@ class ScanSummary:
     failed_contracts: int = 0
     unresolved_contracts_timeout: int = 0
     deduplicated_contracts: int = 0
+    candidate_strikes: int = 0
+    secdef_info_calls: int = 0
+    contract_cache_hits: int = 0
+    contract_validations_succeeded: int = 0
+    contract_validations_failed: int = 0
+    secdef_info_latency_mean_ms: float = 0.0
+    secdef_info_latency_p50_ms: float = 0.0
+    secdef_info_latency_p95_ms: float = 0.0
+    max_concurrent_contract_requests: int = 0
     with_bid_ask_delta: int = 0
     with_bid_ask_without_delta: int = 0
     with_delta_without_bid_ask: int = 0
@@ -105,16 +114,22 @@ def _ibkr_candidates(
 
     confirmed: list[tuple[str, float, date]] = []
     phase_started = clock()
-    for month in months:
+    # Search only provides monthly buckets.  Prefer buckets nearest the DTE
+    # window, then strikes nearest the configured margin boundary.  This only
+    # changes submission order: without a timeout every contract is retained.
+    target_dte = (args.min_dte + args.max_dte) / 2
+    ordered_months = sorted(months, key=lambda value: (abs((value - today).days - target_dte), value))
+    latency_samples: list[tuple[float, int]] = []
+    for month in ordered_months:
         if expired(discovery_deadline, "expirations_strikes"):
             break
         all_strikes = provider.get_put_strikes(conid, month)
         finish_phase("expirations_strikes", phase_started)
         phase_started = clock()
-        strikes = tuple(
+        strikes = tuple(sorted((
             strike for strike in all_strikes
             if safety_margin(underlying.current_price, strike) >= args.min_safety_margin
-        )
+        ), key=lambda strike: (abs(safety_margin(underlying.current_price, strike) - args.min_safety_margin), strike)))
         stats.rejected_margin += len(all_strikes) - len(strikes)
         finish_phase("dte_margin_filter", phase_started)
         phase_started = clock()
@@ -127,7 +142,7 @@ def _ibkr_candidates(
             conid, month, strikes, symbol=args.ticker,
             deadline=discovery_deadline, progress=resolution_progress,
             accounting=resolution_accounting.append,
-            max_workers=getattr(args, "contract_workers", 4),
+            max_workers=getattr(args, "contract_workers", 8),
         )
         for contract in contracts:
             expiration = provider.contract_expiration(contract)
@@ -141,6 +156,17 @@ def _ibkr_candidates(
             stats.failed_contracts += account.failed
             stats.unresolved_contracts_timeout += account.unresolved_timeout
             stats.deduplicated_contracts += account.deduplicated
+            stats.candidate_strikes += account.candidate_strikes
+            stats.secdef_info_calls += account.info_calls
+            stats.contract_cache_hits += account.cache_hits
+            stats.contract_validations_succeeded += account.validations_succeeded
+            stats.contract_validations_failed += account.validations_failed
+            stats.max_concurrent_contract_requests = max(stats.max_concurrent_contract_requests, account.max_concurrent_requests)
+            if account.info_calls:
+                latency_samples.append((account.info_latency_mean_ms, account.info_calls))
+                # Per-group approximations; raw timings remain private inside provider.
+                stats.secdef_info_latency_p50_ms = max(stats.secdef_info_latency_p50_ms, account.info_latency_p50_ms)
+                stats.secdef_info_latency_p95_ms = max(stats.secdef_info_latency_p95_ms, account.info_latency_p95_ms)
         else:  # Compatibility with injected/third-party providers.
             stats.target_contracts += len(tuple(dict.fromkeys(strikes)))
             stats.resolved_contracts += len(contracts)
@@ -157,6 +183,10 @@ def _ibkr_candidates(
             stats.timed_out = True
             stats.timeout_phase = "contract_resolution"
             break
+
+    if latency_samples:
+        calls = sum(count for _, count in latency_samples)
+        stats.secdef_info_latency_mean_ms = sum(mean * count for mean, count in latency_samples) / calls
 
     stats.considered = len(confirmed)
     if not confirmed:
@@ -284,6 +314,12 @@ def main() -> None:
             f"contratos_fallidos={summary.failed_contracts} "
             f"contratos_no_resueltos_timeout={summary.unresolved_contracts_timeout} "
             f"contratos_deduplicados={summary.deduplicated_contracts}\n"
+            f"strikes_candidatos={summary.candidate_strikes} secdef_info_calls={summary.secdef_info_calls} "
+            f"cache_hits={summary.contract_cache_hits} validaciones_ok={summary.contract_validations_succeeded} "
+            f"validaciones_fallidas={summary.contract_validations_failed} "
+            f"secdef_info_ms_mean={summary.secdef_info_latency_mean_ms:.1f} "
+            f"p50={summary.secdef_info_latency_p50_ms:.1f} p95={summary.secdef_info_latency_p95_ms:.1f} "
+            f"concurrencia_max={summary.max_concurrent_contract_requests}\n"
             "MARKET_DATA: "
             f"con_bid_ask_delta={summary.with_bid_ask_delta} "
             f"con_bid_ask_sin_delta={summary.with_bid_ask_without_delta} "

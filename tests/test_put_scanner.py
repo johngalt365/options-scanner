@@ -143,6 +143,7 @@ class PhaseBudgetTest(TestCase):
             self.market_contract_count = 0
             self.resolved_count = resolved_count
             self.target_count = target_count
+            self.resolution_order = []
 
         def require_authenticated_session(self):
             pass
@@ -154,6 +155,7 @@ class PhaseBudgetTest(TestCase):
             return tuple(range(50, 50 + self.target_count))
 
         def discover_put_contracts(self, conid, month, strikes, **kwargs):
+            self.resolution_order.extend(strikes)
             self.clock.value += self.resolution_seconds
             progress = kwargs.get("progress")
             if progress:
@@ -213,6 +215,23 @@ class PhaseBudgetTest(TestCase):
         self.assertEqual((len(candidates), provider.market_contract_count), (39, 39))
         self.assertEqual([candidate.strike for candidate in rank_candidates(candidates)],
                          sorted(candidate.strike for candidate in candidates))
+        self.assertEqual(provider.resolution_order, sorted(provider.resolution_order, reverse=True))
+
+    def test_priority_order_is_deterministic_and_does_not_change_full_set(self):
+        orders = []
+        sets = []
+        for _ in range(2):
+            provider = self.Provider(self.Clock(), target_count=8)
+            summary = ScanSummary()
+            candidates = _ibkr_candidates(
+                provider, self.args(min_safety_margin=0), date(2026, 8, 20),
+                summary=summary, clock=provider.clock,
+            )
+            orders.append(provider.resolution_order)
+            sets.append({candidate.strike for candidate in candidates})
+        self.assertEqual(orders[0], orders[1])
+        self.assertEqual(sets[0], sets[1])
+        self.assertEqual(len(sets[0]), 8)
 
     def test_timeout_during_market_data_is_named(self):
         clock = self.Clock()
@@ -241,7 +260,10 @@ class PhaseBudgetTest(TestCase):
             deadline=time.monotonic() + .005, max_workers=2, accounting=accounts.append,
         )
         self.assertEqual(len(contracts), 2)
-        self.assertEqual(accounts, [ContractResolutionAccounting(2, 2, 0, 0, 0)])
+        self.assertEqual((accounts[0].target, accounts[0].resolved, accounts[0].failed,
+                          accounts[0].unresolved_timeout), (2, 2, 0, 0))
+        self.assertEqual((accounts[0].candidate_strikes, accounts[0].info_calls,
+                          accounts[0].max_concurrent_requests), (2, 2, 2))
 
     def test_market_data_completeness_and_6509_categories_are_counted(self):
         provider = self.Provider(self.Clock(), target_count=5)

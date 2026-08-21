@@ -50,6 +50,15 @@ class ScanMetrics:
     failed_contracts: int = 0
     unresolved_contracts_timeout: int = 0
     deduplicated_contracts: int = 0
+    candidate_strikes: int = 0
+    secdef_info_calls: int = 0
+    contract_cache_hits: int = 0
+    contract_validations_succeeded: int = 0
+    contract_validations_failed: int = 0
+    secdef_info_latency_mean_ms: float = 0.0
+    secdef_info_latency_p50_ms: float = 0.0
+    secdef_info_latency_p95_ms: float = 0.0
+    max_concurrent_contract_requests: int = 0
     with_bid_ask_delta: int = 0
     with_bid_ask_without_delta: int = 0
     with_delta_without_bid_ask: int = 0
@@ -85,7 +94,7 @@ class PutScanService:
         self, request: ScanRequest, *, base_url: str = "https://localhost:5000/v1/api",
         allow_insecure_tls: bool = False, scan_timeout: float = 30.0,
         market_data_timeout: float = 10.0, provider: object | None = None,
-        batch_size: int = 50, snapshot_attempts: int = 2, contract_workers: int = 4,
+        batch_size: int = 50, snapshot_attempts: int = 2, contract_workers: int = 8,
         progress: bool = False, verbose: bool = False,
     ) -> ScanResult:
         started = self._clock()

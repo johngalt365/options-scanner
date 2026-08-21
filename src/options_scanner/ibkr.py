@@ -169,6 +169,15 @@ class ContractResolutionAccounting:
     failed: int
     unresolved_timeout: int
     deduplicated: int
+    candidate_strikes: int = 0
+    info_calls: int = 0
+    cache_hits: int = 0
+    validations_succeeded: int = 0
+    validations_failed: int = 0
+    info_latency_mean_ms: float = 0.0
+    info_latency_p50_ms: float = 0.0
+    info_latency_p95_ms: float = 0.0
+    max_concurrent_requests: int = 0
 
     def __post_init__(self) -> None:
         if self.resolved + self.failed + self.unresolved_timeout != self.target:
@@ -341,16 +350,34 @@ class IbkrMarketDataProvider:
         total = len(unique_strikes)
         deduplicated = len(requested_strikes) - total
 
+        metric_lock = threading.Lock()
+        latencies: list[float] = []
+        info_calls = 0
+        active_requests = 0
+        maximum_requests = 0
+
         def resolve(strike: float) -> tuple[tuple[ConfirmedOptionContract, ...], bool]:
+            nonlocal info_calls, active_requests, maximum_requests
             key = (str(conid), symbol.upper(), month, float(strike))
             with self._contract_cache_lock:
                 candidates = self._contract_cache.get(key)
             validated = candidates is None
             if candidates is None:
-                data = self._get("/iserver/secdef/info", {
-                    "conid": conid, "secType": "OPT", "month": _format_ibkr_month(month),
-                    "exchange": "SMART", "strike": str(strike), "right": "P",
-                })
+                with metric_lock:
+                    info_calls += 1
+                    active_requests += 1
+                    maximum_requests = max(maximum_requests, active_requests)
+                request_started = time.monotonic()
+                try:
+                    data = self._get("/iserver/secdef/info", {
+                        "conid": conid, "secType": "OPT", "month": _format_ibkr_month(month),
+                        "exchange": "SMART", "strike": str(strike), "right": "P",
+                    })
+                finally:
+                    elapsed = max(0.0, time.monotonic() - request_started)
+                    with metric_lock:
+                        active_requests -= 1
+                        latencies.append(elapsed)
                 rows = data if isinstance(data, Sequence) and not isinstance(data, (str, bytes)) else ()
                 found = []
                 for row in rows:
@@ -425,13 +452,25 @@ class IbkrMarketDataProvider:
             for candidate in candidates:
                 confirmed.setdefault(candidate.conid, candidate)
         cache_hits = sum(not validated for _, validated in results.values())
-        target = total - cache_hits
-        resolved = sum(bool(candidates) and validated for candidates, validated in results.values())
-        failed = sum(not candidates and validated for candidates, validated in results.values())
+        target = total
+        resolved = sum(bool(candidates) for candidates, _ in results.values())
+        failed = sum(not candidates for candidates, _ in results.values())
+        validations_succeeded = sum(bool(candidates) and validated for candidates, validated in results.values())
+        validations_failed = sum(not candidates and validated for candidates, validated in results.values())
         unresolved = target - resolved - failed
+        ordered_latencies = sorted(latencies)
+        def percentile(fraction: float) -> float:
+            if not ordered_latencies:
+                return 0.0
+            return ordered_latencies[min(len(ordered_latencies) - 1, int((len(ordered_latencies) - 1) * fraction))] * 1000
         if accounting is not None:
             accounting(ContractResolutionAccounting(
-                target, resolved, failed, unresolved, deduplicated + cache_hits,
+                target, resolved, failed, unresolved, deduplicated,
+                candidate_strikes=len(requested_strikes), info_calls=info_calls,
+                cache_hits=cache_hits, validations_succeeded=validations_succeeded,
+                validations_failed=validations_failed, info_latency_mean_ms=(sum(latencies) / len(latencies) * 1000 if latencies else 0.0),
+                info_latency_p50_ms=percentile(.50), info_latency_p95_ms=percentile(.95),
+                max_concurrent_requests=maximum_requests,
             ))
         return tuple(confirmed.values())
 
