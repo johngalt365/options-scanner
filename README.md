@@ -108,6 +108,12 @@ confina a su fila. Como la implementación continúa siendo WSGI estándar y no
 añade streaming ni dependencias, el progreso identifica el lote activo pero la
 tabla se incorpora al terminar la respuesta completa, no fila a fila.
 
+El selector **Universo** permite usar la entrada manual, uno de los grupos
+predefinidos o una watchlist suministrada a `create_app`. Las tres fuentes se
+normalizan a mayúsculas, se deduplican conservando el orden y desembocan en el
+mismo pipeline anterior: un símbolo mantiene la vista single-ticker y varios
+símbolos usan el screener multi-ticker y sus detalles independientes.
+
 ## Scanner real de venta de PUTs
 
 El primer scanner ejecutable está limitado por defecto a NVDA, es de **solo

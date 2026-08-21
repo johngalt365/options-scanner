@@ -5,7 +5,7 @@ from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
 from options_scanner.scan_service import ScanMetrics, ScanResult
 from options_scanner.scanner import PutScanCandidate
 from options_scanner.web import (_interpretation, _rows, create_app, ibkr_connection_status, parse_tickers,
-                                 render_technical_screener)
+                                 render_technical_screener, resolve_universe)
 from options_scanner.historical import HistoricalBar
 from datetime import timedelta
 from options_scanner.scanner import rank_candidates
@@ -62,6 +62,31 @@ class WebTest(TestCase):
         for invalid in ("", "NVDA,$BAD", "TOO-LONG-SYMBOL"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 parse_tickers(invalid)
+
+    def test_manual_and_watchlist_universes_reach_the_same_multi_ticker_pipeline(self):
+        manual_service = StubService()
+        watchlist_service = StubService()
+        manual = FORM.replace("NVDA", "nvda%2C+spy+NVDA+qqq") + "&universe_source=manual"
+        watchlist = FORM.replace("ticker=NVDA", "ticker=") + "&universe_source=watchlist%3Acore"
+
+        manual_status, manual_page = request(create_app(manual_service), "POST", manual)
+        watchlist_status, watchlist_page = request(
+            create_app(watchlist_service, watchlists={"core": ("nvda", "SPY", "nvda", "qqq")}),
+            "POST", watchlist,
+        )
+
+        self.assertEqual((manual_status, watchlist_status), ("200 OK", "200 OK"))
+        expected = ["NVDA", "SPY", "QQQ"]
+        self.assertEqual([item.ticker for item in manual_service.requests], expected)
+        self.assertEqual([item.ticker for item in watchlist_service.requests], expected)
+        self.assertEqual(manual_page.count('class="ticker-detail"'), 3)
+        self.assertEqual(watchlist_page.count('class="ticker-detail"'), 3)
+
+    def test_all_universe_sources_use_the_canonical_normalizer(self):
+        self.assertEqual(resolve_universe("manual", "spy, qqq SPY"), ("SPY", "QQQ"))
+        self.assertEqual(resolve_universe("watchlist:mine", "ignored",
+                                          {"mine": ("spy", "QQQ", "spy")}), ("SPY", "QQQ"))
+        self.assertEqual(resolve_universe("group:indices", "ignored"), ("SPY", "QQQ", "IWM"))
 
     def test_multi_ticker_is_compact_and_failure_does_not_abort_other_rows(self):
         class MixedService(StubService):
@@ -182,7 +207,7 @@ class WebTest(TestCase):
         _, page = request(create_app(StubService()))
         self.assertIn('id="scan-status"', page)
         self.assertIn('class="spinner"', page)
-        self.assertIn("Escaneando '+form.elements.ticker.value", page)
+        self.assertIn("Analizando universo seleccionado", page)
         self.assertIn("Tiempo transcurrido:", page)
         self.assertIn("setInterval", page)
         self.assertIn("scanButton.disabled=true", page)
