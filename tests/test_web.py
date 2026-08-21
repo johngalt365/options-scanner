@@ -10,7 +10,8 @@ from options_scanner.historical import HistoricalBar
 from datetime import timedelta
 from options_scanner.scanner import rank_candidates
 from options_scanner.technical_analysis import PriceZone, ZoneType
-from options_scanner.technical_context import TechnicalContext, build_multi_technical_context
+from options_scanner.technical_context import (ConfluenceOrigin, TechnicalConfluence, TechnicalContext,
+                                               build_multi_technical_context)
 from options_scanner.technical_check import TechnicalCheckResult
 from options_scanner.historical import HistoricalPeriod
 from datetime import date
@@ -181,6 +182,40 @@ class WebTest(TestCase):
             self.assertRegex(page, rf'class="sort-button"[^>]*>{heading}')
         self.assertIn("Strike $95.00 situado por encima de S1 ($70.73–$91.04). S1 fuerte, 3 contactos.", page)
         self.assertNotIn("recomend", page.lower())
+
+    def test_multi_table_detail_and_candidate_summary_share_strike_classification(self):
+        zone = PriceZone(70.73, 91.04, 80, ZoneType.SUPPORT, 3, date(2026, 8, 1), 75, "fuerte")
+        periods = (HistoricalPeriod.THREE_MONTHS, HistoricalPeriod.SIX_MONTHS,
+                   HistoricalPeriod.ONE_YEAR)
+        confluence = TechnicalConfluence(
+            70.73, 91.04, ZoneType.SUPPORT,
+            tuple(ConfluenceOrigin(period, zone) for period in periods[:2]), 0,
+        )
+        context = TechnicalContext("AEHR", HistoricalPeriod.MULTI, (), 100, (), (), (),
+                                   None, None, None, None, (), (), (confluence,),
+                                   periods, periods[:2])
+        candidate = PutScanCandidate(
+            ticker="AEHR", expiration=date(2026, 9, 24), dte=34, strike=80,
+            underlying_price=100, safety_margin=.20, bid=1, ask=1.2, delta=-.2,
+            gamma=None, theta=None, vega=None, implied_volatility=.3,
+            open_interest=100, market_data_availability="RealTime",
+        )
+        result = ScanResult((candidate,), ScanMetrics(historical_period="multi"), .1,
+                            underlying_price=100, technical_context=context)
+
+        page = _multi_screener((("AEHR", result, None),))
+
+        # Table relationship, candidate textual summary, and detail explanation all
+        # originate in TechnicalContext.classify_strike_against_confluence.
+        self.assertGreaterEqual(page.count("Dentro de confluencia"), 3)
+        self.assertIn('class="has-candidates strike-inside"', page)
+        self.assertIn("$70.73–$91.04", page)
+        self.assertIn("2/3", page)
+        self.assertIn(
+            "Strike $80.00 dentro de confluencia de soporte $70.73–$91.04 · 2/3 horizontes.",
+            page,
+        )
+        self.assertNotIn("sin zona de soporte relevante disponible", page)
 
     def test_multi_screener_controls_badges_summary_and_fourteen_rows(self):
         items = tuple(

@@ -84,3 +84,21 @@ def test_confluence_context_preserves_two_and_three_horizons_and_empty_state():
     assert len(classify_strike_against_confluences(82, (pair, triple)).confluence.origins) == 3
     missing = classify_strike_against_confluences(75, ())
     assert missing.confluence is None and missing.position_label == "Sin confluencia relevante"
+
+
+def test_multi_model_distinguishes_requested_available_and_participating_horizons():
+    pair = TechnicalConfluence(70.73, 91.04, ZoneType.SUPPORT,
+        (ConfluenceOrigin(P[0], zone(70, 92)), ConfluenceOrigin(P[1], zone(70.73, 91.04))), 0)
+    multi = TechnicalContext("AEHR", HistoricalPeriod.MULTI, (), 100, (), (), (), None, None,
+                             None, None, (), (), (pair,), P, P[:2])
+
+    relationship = multi.classify_strike_against_confluence(80)
+
+    assert multi.requested_horizons == P
+    assert multi.available_horizons == P[:2]
+    assert pair.participating_horizons == P[:2]
+    assert relationship.horizon_ratio == "2/3"
+    assert relationship.position_label == "Dentro de confluencia"
+    assert relationship.explanation() == (
+        "Strike $80.00 dentro de confluencia de soporte $70.73–$91.04 · 2/3 horizontes."
+    )

@@ -13,7 +13,7 @@ from wsgiref.simple_server import make_server
 from options_scanner.ibkr import GatewayUnavailableError, IbkrError, NotAuthenticatedError
 from options_scanner.scan_service import PutScanService, ScanRequest, ScanResult
 from options_scanner.historical import HistoricalPeriod
-from options_scanner.technical_context import (StrikePosition, classify_strike_against_confluences,
+from options_scanner.technical_context import (StrikePosition,
                                                classify_support_proximity, distance_to_zone_percent)
 from options_scanner.technical_check import (DEFAULT_TICKERS, TechnicalCheckResult,
                                              _svg_chart, _visible_zones, check_tickers)
@@ -147,14 +147,14 @@ def _directional_distance(value: float, kind: str) -> str:
 
 
 def _confluence_strike_values(candidate, context):
-    relationship = classify_strike_against_confluences(candidate.strike, context.confluences)
+    relationship = context.classify_strike_against_confluence(candidate.strike)
     item = relationship.confluence
     if item is None:
         return relationship, "Sin confluencia relevante", "N/D", relationship.position_label
     distance = ("Dentro (0.00%)" if relationship.distance_percent == 0 else
                 f"{abs(relationship.distance_percent):.2f}% "
                 f"{'sobre' if relationship.distance_percent > 0 else 'bajo'} el borde")
-    return (relationship, f"${item.lower:.2f}–${item.upper:.2f}", f"{len(item.origins)}/3",
+    return (relationship, f"${item.lower:.2f}–${item.upper:.2f}", relationship.horizon_ratio,
             f"{relationship.position_label} · {distance}")
 
 
@@ -211,8 +211,10 @@ def _strike_context_label(candidate) -> str:
             .replace("/", "–"))
 
 
-def _strike_support_explanation(candidate) -> str:
+def _strike_support_explanation(candidate, context=None) -> str:
     """Explain the stored strike context deterministically and descriptively."""
+    if context and context.period == HistoricalPeriod.MULTI:
+        return context.classify_strike_against_confluence(candidate.strike).explanation()
     zone = candidate.nearest_support_below
     if zone is None or not candidate.support_zone_label:
         return f"Strike ${candidate.strike:.2f} sin zona de soporte relevante disponible."
@@ -466,9 +468,9 @@ def _technical_chart(result: ScanResult | None, *, lazy: bool = False) -> str:
                               f'${origin.zone.upper:.2f} · {escape(origin.zone.strength)}</li>'
                               for origin in item.origins)
             cards.append(f'<details class="confluence"><summary>{title} ${item.lower:.2f}–${item.upper:.2f} '
-                         f'· {len(item.origins)}/3 horizontes</summary><ul>{origins}</ul>'
+                         f'· {len(item.participating_horizons)}/{len(context.requested_horizons)} horizontes</summary><ul>{origins}</ul>'
                          f'<p>Distancia al precio: {_directional_distance(item.distance_percent, item.kind.value)}</p></details>')
-        available_horizons = sum(bool(item.bars) for item in context.horizon_contexts)
+        available_horizons = len(context.available_horizons)
         empty_confluence = ('<p>No hay suficientes horizontes para determinar confluencia.</p>'
                              if available_horizons < 2 else '<p>Sin confluencia</p>')
         summary += ('<div class="confluence-summary"><h3>Confluencias</h3>' +
@@ -563,7 +565,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
             with_candidates += bool(best)
             if multi_mode and context:
                 if best:
-                    _, support_value, horizon_value, strike_value = _confluence_strike_values(best, context)
+                    relationship, support_value, horizon_value, strike_value = _confluence_strike_values(best, context)
                 else:
                     support_confluences = tuple(item for item in context.confluences
                                                 if item.kind.value == "support")
@@ -571,7 +573,8 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                                   key=lambda item: abs(result.underlying_price - item.upper)) if support_confluences else None
                     support_value = (f"${nearest.lower:.2f}–${nearest.upper:.2f}" if nearest
                                      else "Sin confluencia relevante")
-                    horizon_value = f"{len(nearest.origins)}/3" if nearest else "N/D"
+                    horizon_value = (f"{len(nearest.participating_horizons)}/{len(context.requested_horizons)}"
+                                     if nearest else "N/D")
                     strike_value = "N/D"
                 legacy_values = ((support_value, support_value), (horizon_value, horizon_value),
                                  (strike_value, strike_value))
@@ -597,17 +600,27 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                 (f"{best.premium_yield*100:.2f} %" if best and best.premium_yield is not None else "N/D", best.premium_yield if best and best.premium_yield is not None else ""),
                 (f"{best.annualized_premium_yield*100:.2f} %" if best and best.annualized_premium_yield is not None else "N/D", best.annualized_premium_yield if best and best.annualized_premium_yield is not None else ""),
                 (_number(best.open_interest) if best else "N/D", best.open_interest if best else ""),
-                (_strike_context_label(best) if best else "N/D", _strike_context_label(best) if best else ""),
+                ((relationship.position_label if multi_mode and context else _strike_context_label(best))
+                 if best else "N/D",
+                 (relationship.position_label if best and multi_mode and context else
+                  _strike_context_label(best) if best else "")),
             )
             detail = (_result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
-                      (f'<p class="strike-explanation">{escape(_strike_support_explanation(best))}</p>' if best else '') +
+                      (f'<p class="strike-explanation">{escape(_strike_support_explanation(best, context))}</p>' if best else '') +
                       '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
                       ''.join(f'<th>{h}</th>' for h in ('Ticker','Expiration','DTE','Strike','Underlying','Distancia al strike','Bid','Ask','Mid','Delta','Gamma','Contract theta','Theta short','Theta %/día','Vega','IV','Open interest','6509','Premium yield','Annualized yield','Contexto técnico')) +
                       f'</tr></thead><tbody>{_rows(result)}</tbody></table></div>{_summary(result)}')
-            relation_class = ({StrikePosition.ABOVE_SUPPORT: " strike-above",
-                               StrikePosition.INSIDE_SUPPORT: " strike-inside",
-                               StrikePosition.BELOW_SUPPORT: " strike-below"}
-                              .get(best.support_position, "") if best else "")
+            if best and multi_mode and context:
+                relation_class = {
+                    "ABOVE": " strike-above",
+                    "INSIDE": " strike-inside",
+                    "BELOW": " strike-below",
+                }.get(relationship.position.name, "")
+            else:
+                relation_class = ({StrikePosition.ABOVE_SUPPORT: " strike-above",
+                                   StrikePosition.INSIDE_SUPPORT: " strike-inside",
+                                   StrikePosition.BELOW_SUPPORT: " strike-below"}
+                                  .get(best.support_position, "") if best else "")
             row_class = ("has-candidates" + relation_class) if best else "no-candidates"
         rendered = ''.join(f'<td data-sort-value="{escape(str(sort_value if sort_value is not None else ""))}">{value}</td>' for value, sort_value in cells)
         opener = (f'<td class="detail-launch"><button type="button" class="detail-trigger chevron" '
