@@ -37,6 +37,7 @@ class PutScanCandidate:
     support_zone_label: str | None = None
     support_position_label: str | None = None
     support_last_contact_sessions: int | None = None
+    event_context: str = "normal"
 
     @property
     def mid(self) -> float | None:
@@ -50,6 +51,22 @@ class PutScanCandidate:
     def annualized_premium_yield(self) -> float | None:
         value = self.premium_yield
         return None if value is None or self.dte <= 0 else value * 365 / self.dte
+
+    @property
+    def contract_theta(self) -> float | None:
+        """Theta delivered for the long option contract, preserved unchanged."""
+        return self.theta
+
+    @property
+    def short_theta(self) -> float | None:
+        """Position theta for a short PUT: the opposite of contract theta."""
+        return None if self.contract_theta is None else -self.contract_theta
+
+    @property
+    def theta_decay_pct_per_day(self) -> float | None:
+        """Theoretical daily decay relative to premium, not a guaranteed return."""
+        mid = self.mid
+        return None if mid is None or mid <= 0 or self.short_theta is None else self.short_theta / mid * 100
 
     @property
     def complete(self) -> bool:

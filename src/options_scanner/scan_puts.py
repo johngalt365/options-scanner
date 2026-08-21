@@ -27,6 +27,10 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--min-safety-margin", type=float, default=.20)
     parser.add_argument("--min-abs-delta", type=float, default=.15)
     parser.add_argument("--max-abs-delta", type=float, default=.30)
+    parser.add_argument("--min-iv", type=float, default=None,
+                        help="IV mínima canónica (fracción decimal); desactivada por defecto")
+    parser.add_argument("--min-short-theta", type=float, default=None,
+                        help="theta mínimo de la posición corta; desactivado por defecto")
     parser.add_argument("--base-url", default="https://localhost:5000/v1/api")
     parser.add_argument("--insecure", action="store_true", help="acepta el certificado TLS local")
     parser.add_argument("--fake", action="store_true", help="usa datos deterministas sin conectar a IBKR")
@@ -244,6 +248,14 @@ def _ibkr_candidates(
             result.append(candidate)
         elif not args.min_abs_delta <= abs(quote.delta) <= args.max_abs_delta:
             stats.rejected_delta += 1
+        elif getattr(args, "min_iv", None) is not None and (
+            quote.implied_volatility is None or quote.implied_volatility < args.min_iv
+        ):
+            continue
+        elif getattr(args, "min_short_theta", None) is not None and (
+            quote.theta is None or -quote.theta < args.min_short_theta
+        ):
+            continue
         else:
             result.append(candidate)
             if candidate.complete:
@@ -289,6 +301,7 @@ def main() -> None:
         ScanRequest(
             args.ticker, args.min_dte, args.max_dte, args.min_safety_margin,
             args.min_abs_delta, args.max_abs_delta, args.fake,
+            min_iv=args.min_iv, min_short_theta=args.min_short_theta,
         ),
         base_url=args.base_url, allow_insecure_tls=args.insecure,
         scan_timeout=args.scan_timeout, market_data_timeout=args.market_data_timeout,

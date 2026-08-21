@@ -29,6 +29,8 @@ class ScanRequest:
     max_abs_delta: float = .30
     fake: bool = False
     historical_period: HistoricalPeriod = HistoricalPeriod.SIX_MONTHS
+    min_iv: float | None = None
+    min_short_theta: float | None = None
 
     def __post_init__(self) -> None:
         ticker = self.ticker.strip().upper()
@@ -38,9 +40,13 @@ class ScanRequest:
         if self.min_dte < 0 or self.max_dte < 0 or self.min_dte > self.max_dte:
             raise ValueError("El DTE mínimo debe ser menor o igual que el máximo.")
         if not 0 <= self.min_safety_margin <= 1:
-            raise ValueError("El margen de seguridad debe estar entre 0 % y 100 %.")
+            raise ValueError("La distancia al strike debe estar entre 0 % y 100 %.")
         if not 0 <= self.min_abs_delta <= self.max_abs_delta <= 1:
             raise ValueError("Las deltas deben estar entre 0 y 1, con mínimo menor o igual que máximo.")
+        if self.min_iv is not None and self.min_iv < 0:
+            raise ValueError("La IV mínima no puede ser negativa.")
+        if self.min_short_theta is not None and self.min_short_theta < 0:
+            raise ValueError("El theta short mínimo no puede ser negativo.")
 
 
 @dataclass(slots=True)
@@ -127,6 +133,7 @@ class PutScanService:
                 fake, request.ticker, as_of, min_dte=request.min_dte, max_dte=request.max_dte,
                 min_safety_margin=request.min_safety_margin, min_abs_delta=request.min_abs_delta,
                 max_abs_delta=request.max_abs_delta,
+                min_iv=request.min_iv, min_short_theta=request.min_short_theta,
             )
             candidates = build_candidates(underlying.current_price, quotes, as_of)
             summary.considered = len(all_quotes)
@@ -149,6 +156,7 @@ class PutScanService:
                 ticker=request.ticker, min_dte=request.min_dte, max_dte=request.max_dte,
                 min_safety_margin=request.min_safety_margin, min_abs_delta=request.min_abs_delta,
                 max_abs_delta=request.max_abs_delta, scan_timeout=scan_timeout,
+                min_iv=request.min_iv, min_short_theta=request.min_short_theta,
                 market_data_timeout=market_data_timeout, batch_size=batch_size,
                 snapshot_attempts=snapshot_attempts, contract_workers=contract_workers,
                 progress=progress, verbose=verbose,

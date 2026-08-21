@@ -1,7 +1,7 @@
 # Options Scanner
 
 Base modular para una aplicación multiusuario de análisis de opciones. El MVP
-busca PUTs de NVDA por DTE, margen de seguridad y delta. No implementa órdenes,
+busca PUTs de NVDA por DTE, distancia al strike y delta. No implementa órdenes,
 login web, base de datos, Docker ni ejecución de operaciones.
 
 ## Arquitectura
@@ -44,7 +44,7 @@ a un usuario, pero esta fase no abre sesiones ni guarda credenciales.
 ## Reglas por defecto
 
 - DTE entre 30 y 45 días, inclusive;
-- margen de seguridad mínimo del 20 %, calculado como
+- distancia al strike mínimo del 20 %, calculado como
   `(precio_actual - strike) / precio_actual`;
 - valor absoluto de delta entre 0,15 y 0,30, inclusive.
 
@@ -128,7 +128,7 @@ símbolos usan el screener multi-ticker y sus detalles independientes.
 El primer scanner ejecutable está limitado por defecto a NVDA, es de **solo
 lectura** y no contiene ninguna operación de órdenes. Obtiene el subyacente,
 descubre los vencimientos exactos confirmados por `secdef/info`, limita DTE y
-margen antes de pedir snapshots y filtra finalmente por delta absoluta:
+distancia al strike antes de pedir snapshots y filtra finalmente por delta absoluta:
 
 ```bash
 PYTHONPATH=src python -m options_scanner.scan_puts \
@@ -155,7 +155,7 @@ espera. Se puede ajustar el comportamiento con `--batch-size`,
 y `secdef/info` no pueden tomar prestada esa reserva, por lo que los snapshots
 no comienzan con un deadline ya agotado. `--progress` muestra el avance real de
 resolución y `Market data batch X/Y`; al final añade tiempos aproximados para
-subyacente, expiraciones/strikes, filtros DTE/margen, confirmación contractual,
+subyacente, expiraciones/strikes, filtros DTE/distancia al strike, confirmación contractual,
 snapshots y filtrado/ranking. El resumen identifica además la fase que agotó
 su presupuesto con `timeout_phase`, y `--progress`/`--verbose` muestran solo
 contadores por endpoint (nunca payloads, cabeceras, cookies o credenciales).
@@ -190,7 +190,7 @@ elegido con el benchmark local de latencia simulada descrito en
 `tests/test_contract_resolution_performance.py`; no representa una medición de
 la latencia ni de los límites del servicio real de IBKR. En timeout se atienden
 primero los meses cercanos al centro del DTE solicitado y, dentro de cada mes,
-los strikes más próximos al límite de margen. El criterio usa solo información
+los strikes más próximos al límite de distancia al strike. El criterio usa solo información
 previa a market data, es determinista y no descarta el resto si hay tiempo.
 
 El resumen separa **Contratos objetivo** (strikes únicos que requerían
@@ -408,6 +408,33 @@ La unidad interna canónica de IV es una **fracción decimal** (`0.482` represen
 `48.2 %`). El adaptador de Client Portal convierte una sola vez el campo 7633,
 que IBKR entrega en puntos porcentuales, al construir la cotización interna; la
 UI aplica el formato porcentual solamente para presentarla.
+
+### Greeks e IV de Client Portal
+
+El snapshot de opciones conserva las unidades que entrega Client Portal para los
+Greeks y normaliza únicamente IV en el borde del proveedor:
+
+| Dato | Field ID | Unidad recibida | Unidad interna | UI |
+|---|---:|---|---|---|
+| Delta | 7308 | cambio de precio de opción por unidad del subyacente | decimal `[-1, 1]` | decimal (4 cifras) |
+| Gamma | 7309 | cambio de delta por unidad del subyacente | decimal | decimal (4 cifras) |
+| Theta | 7310 | cambio teórico de prima por día del contrato largo | unidades monetarias/día | decimal (4 cifras) |
+| Vega | 7311 | cambio de prima según la convención de volatilidad de IBKR | decimal | decimal (4 cifras) |
+| IV | 7633 | puntos porcentuales (`48.2` = 48.2 %) | fracción decimal (`0.482`) | porcentaje (`48.20 %`) |
+
+Para Venta de PUT se preserva `contract_theta` sin alterar y se deriva
+`short_theta = -contract_theta`. Si existe `mid > 0`, se calcula
+`theta_decay_pct_per_day = short_theta / mid * 100`. Esta última métrica es una
+aproximación teórica de erosión temporal relativa a la prima, manteniendo las
+demás variables constantes; no es una rentabilidad diaria garantizada.
+
+El filtro de IV desactivado acepta también IV `N/D`; activado, un contrato sin IV
+no satisface ese criterio. Client Portal ofrece snapshots de IV actual, pero su
+endpoint histórico estándar entrega barras del instrumento y no una serie
+histórica inequívoca de IV por contrato con la que calcular IV Rank o IV
+Percentile de forma comparable. Por ello esta versión no inventa esa serie ni
+implementa ambas métricas. `event_context` queda inicialmente en `normal`; no se
+aplican reglas automáticas de earnings.
 
 ## Validación técnica multi-ticker
 
