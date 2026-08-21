@@ -124,6 +124,41 @@ Una entrada contractual solo llega a esa caché después de ejecutar y validar
 estrictamente `secdef/info`; la reutilización no convierte una respuesta de
 búsqueda mensual en una confirmación.
 
+### Resolución contractual: investigación y medición
+
+El flujo sigue la secuencia documentada por IBKR Client Portal Web API:
+[`/iserver/secdef/search`](https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/#security-definition-search)
+descubre el subyacente y los *meses* disponibles;
+[`/iserver/secdef/strikes`](https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/#security-definition-strikes)
+devuelve las listas de strikes call/put de un mes; y
+[`/iserver/secdef/info`](https://www.interactivebrokers.com/campus/ibkr-api-page/cpapi-v1/#security-definition-information)
+recibe un único `strike` y puede devolver una lista con varios contratos (por
+ejemplo, varios vencimientos del mismo strike dentro del mes). Por ello el
+scanner ya aprovecha una sola respuesta `info` para **todos los vencimientos de
+ese strike**. La documentación no define una petición de múltiples strikes en
+`info`, y ni `search` ni `strikes` devuelven la identidad completa y exacta del
+contrato. No se agrupan más strikes ni se usan esas respuestas como sustituto:
+cada `conid` conserva la validación inequívoca de símbolo, `OPT`, PUT, strike y
+vencimiento exactos antes de market data.
+
+Las optimizaciones seguras son, por tanto, evitar duplicados, reutilizar la
+caché ya validada y mantener varias llamadas independientes en vuelo. El
+default de `--contract-workers` es 8 (configurable, limitado siempre a 16),
+elegido con el benchmark local de latencia simulada descrito en
+`tests/test_contract_resolution_performance.py`; no representa una medición de
+la latencia ni de los límites del servicio real de IBKR. En timeout se atienden
+primero los meses cercanos al centro del DTE solicitado y, dentro de cada mes,
+los strikes más próximos al límite de margen. El criterio usa solo información
+previa a market data, es determinista y no descarta el resto si hay tiempo.
+
+El resumen separa **Contratos objetivo** (strikes únicos que requerían
+resolución) de **Considerados** (contratos exactos que llegaron a market data y
+filtros finales). También publica strikes candidatos, llamadas reales a
+`secdef/info`, cache hits, deduplicados, validaciones correctas/fallidas,
+latencia media/p50/p95 aproximada y concurrencia máxima. Son exclusivamente
+contadores y tiempos: no se registran URLs completas, parámetros, headers,
+cookies ni payloads.
+
 Para probar exactamente el mismo comando sin Gateway ni datos reales:
 
 ```bash
