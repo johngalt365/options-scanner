@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import secrets
 import sqlite3
@@ -34,7 +35,8 @@ class SQLiteWorkspaceStore:
     request_identity_required = True
 
     def __init__(self, path: str):
-        self.path = path
+        self.path = str(Path(path).expanduser().resolve())
+        self.last_watchlist_migration = None
         self._initialize()
 
     def _connect(self):
@@ -59,7 +61,7 @@ class SQLiteWorkspaceStore:
                   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                   key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id,key));
             """)
-            self._migrate_watchlist_names(db)
+            self.last_watchlist_migration = self._migrate_watchlist_names(db)
 
     @staticmethod
     def _migrate_watchlist_names(db):
@@ -70,6 +72,10 @@ class SQLiteWorkspaceStore:
         databases whose unique index still contains distinct, non-normalized
         keys which normalize to the same value.
         """
+        # Do not trust schema_version: beta databases can contain only part of
+        # v2 after an interrupted/manual upgrade.  One explicit transaction
+        # makes the repair all-or-nothing (executescript would commit early).
+        db.execute("BEGIN IMMEDIATE")
         columns = {row[1] for row in db.execute("PRAGMA table_info(watchlists)")}
         if "name_key" not in columns:
             db.execute("ALTER TABLE watchlists ADD COLUMN name_key TEXT")
@@ -80,6 +86,8 @@ class SQLiteWorkspaceStore:
         for row in rows:
             display_name, name_key = normalize_watchlist_name(row[3])
             groups.setdefault((row[2], name_key), []).append((row, display_name))
+        duplicate_groups = sum(len(group) > 1 for group in groups.values())
+        duplicates_deleted = 0
         for (_, name_key), duplicates in groups.items():
             keeper, display_name = duplicates[0]
             merged = []
@@ -91,6 +99,7 @@ class SQLiteWorkspaceStore:
             # changing the keeper's legacy key to a duplicate's normalized key.
             for row, _ in duplicates[1:]:
                 db.execute("DELETE FROM watchlists WHERE rowid=?", (row[0],))
+                duplicates_deleted += 1
             db.execute(
                 "UPDATE watchlists SET name=?,name_key=?,symbols=? WHERE rowid=?",
                 (display_name, name_key, json.dumps(merged), keeper[0]),
@@ -101,26 +110,35 @@ class SQLiteWorkspaceStore:
         # startup can also self-heal an interrupted or manually altered v2 DB.
         indexes = {row[1]: row for row in db.execute("PRAGMA index_list(watchlists)")}
         owner_name = indexes.get("watchlists_owner_name")
+        index_recreated = owner_name is None
         if owner_name is not None:
             columns = tuple(
                 row[2] for row in db.execute("PRAGMA index_info(watchlists_owner_name)")
             )
             if not owner_name[2] or columns != ("user_id", "name_key"):
                 db.execute("DROP INDEX watchlists_owner_name")
+                index_recreated = True
         db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS watchlists_owner_name "
             "ON watchlists(user_id,name_key)"
         )
-        db.executescript("""
-            CREATE TRIGGER IF NOT EXISTS watchlists_name_key_insert
+        db.execute("""CREATE TRIGGER IF NOT EXISTS watchlists_name_key_insert
             BEFORE INSERT ON watchlists WHEN NEW.name_key IS NULL OR NEW.name_key = ''
-            BEGIN SELECT RAISE(ABORT, 'watchlist name key required'); END;
-            CREATE TRIGGER IF NOT EXISTS watchlists_name_key_update
+            BEGIN SELECT RAISE(ABORT, 'watchlist name key required'); END""")
+        db.execute("""CREATE TRIGGER IF NOT EXISTS watchlists_name_key_update
             BEFORE UPDATE OF name_key ON watchlists WHEN NEW.name_key IS NULL OR NEW.name_key = ''
-            BEGIN SELECT RAISE(ABORT, 'watchlist name key required'); END;
-            DELETE FROM schema_version;
-            INSERT INTO schema_version(version) VALUES(2);
-        """)
+            BEGIN SELECT RAISE(ABORT, 'watchlist name key required'); END""")
+        db.execute("DELETE FROM schema_version")
+        db.execute("INSERT INTO schema_version(version) VALUES(2)")
+        db.commit()
+        return {
+            "executed": True,
+            "rows_scanned": len(rows),
+            "duplicate_groups": duplicate_groups,
+            "duplicates_deleted": duplicates_deleted,
+            "index_recreated": index_recreated,
+            "committed": True,
+        }
 
     def add_user(self, user: User) -> None:
         try:

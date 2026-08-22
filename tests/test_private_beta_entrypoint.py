@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest.mock
 
@@ -7,7 +8,8 @@ import pytest
 from options_scanner.private_beta_entrypoint import (ConfigurationError,
                                                       PrivateBetaConfig,
                                                       build_application,
-                                                      create_user)
+                                                      create_user,
+                                                      main)
 
 
 def config_env(**updates):
@@ -62,3 +64,42 @@ def test_create_operator_then_duplicate_has_clear_message(capsys):
              unittest.mock.patch("getpass.getpass", side_effect=passwords):
             assert create_user(config, "operator") == 2
         assert "ya existe el username 'operator1'" in capsys.readouterr().err
+
+
+def test_inspect_db_is_read_only_and_reports_watchlist_schema(monkeypatch, capsys):
+    with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database:
+        with sqlite3.connect(database.name) as db:
+            db.executescript("""
+                CREATE TABLE schema_version(version INTEGER PRIMARY KEY);
+                INSERT INTO schema_version VALUES(2);
+                CREATE TABLE watchlists(id TEXT, user_id TEXT, name TEXT,
+                                        symbols TEXT, name_key TEXT);
+                CREATE UNIQUE INDEX watchlists_owner_name
+                  ON watchlists(user_id,name_key);
+                CREATE TRIGGER watchlists_guard BEFORE INSERT ON watchlists
+                  BEGIN SELECT 1; END;
+                INSERT INTO watchlists VALUES('one','user','Techbeta','["AAPL"]','techbeta');
+            """)
+        before = os.stat(database.name).st_mtime_ns
+        monkeypatch.setenv("OPTIONS_SCANNER_DB", database.name)
+        assert main(["inspect-db"]) == 0
+        output = capsys.readouterr().out
+        assert f"database: {os.path.realpath(database.name)}" in output
+        assert "schema_version: [(2,)]" in output
+        assert "PRAGMA table_info(watchlists)" in output
+        assert "PRAGMA index_list(watchlists)" in output
+        assert "PRAGMA index_info(watchlists_owner_name)" in output
+        assert "watchlists_guard" in output
+        assert "(1, 'one', 'user', 'Techbeta', 'techbeta', '[\"AAPL\"]')" in output
+        assert os.stat(database.name).st_mtime_ns == before
+
+
+def test_debug_migration_reports_commit_and_absolute_server_database(monkeypatch, capsys):
+    with tempfile.TemporaryDirectory() as directory:
+        database = os.path.join(directory, "beta.sqlite3")
+        config = PrivateBetaConfig(database, "local-smoke", False)
+        build_application(config, debug_migrations=True)
+        output = capsys.readouterr().out
+        assert "executed=true" in output
+        assert "duplicates_deleted=0" in output
+        assert "committed=true" in output
