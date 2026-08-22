@@ -39,12 +39,16 @@ class ScanRequest:
         if not ticker or len(ticker) > 12 or not ticker.replace(".", "").replace("-", "").isalnum():
             raise ValueError("El ticker debe ser un símbolo válido.")
         object.__setattr__(self, "ticker", ticker)
-        if self.min_dte < 0 or self.max_dte < 0 or self.min_dte > self.max_dte:
-            raise ValueError("El DTE mínimo debe ser menor o igual que el máximo.")
+        if self.min_dte < 0 or self.max_dte < 0:
+            raise ValueError("Los valores DTE no pueden ser negativos.")
+        if self.min_dte > self.max_dte:
+            raise ValueError("DTE mínimo no puede ser mayor que DTE máximo.")
         if not 0 <= self.min_safety_margin <= 1:
             raise ValueError("La distancia al strike debe estar entre 0 % y 100 %.")
-        if not 0 <= self.min_abs_delta <= self.max_abs_delta <= 1:
-            raise ValueError("Las deltas deben estar entre 0 y 1, con mínimo menor o igual que máximo.")
+        if not 0 <= self.min_abs_delta <= 1 or not 0 <= self.max_abs_delta <= 1:
+            raise ValueError("Los valores de |Delta| deben estar entre 0 y 1.")
+        if self.min_abs_delta > self.max_abs_delta:
+            raise ValueError("|Delta| mínimo no puede ser mayor que |Delta| máximo.")
         if self.min_iv is not None and self.min_iv < 0:
             raise ValueError("La IV mínima no puede ser negativa.")
         if self.min_short_theta is not None and self.min_short_theta < 0:
@@ -203,7 +207,7 @@ class PutScanService:
                     summary.discarded_contracts.append(DiscardedContract(
                         request.ticker, contract.expiration, contract.strike, tuple(reasons)
                     ))
-            market_status = "Simulado"
+            market_status = "Demo"
         else:
             # Kept here as a lazy import so legacy imports from scan_puts remain compatible.
             from options_scanner.scan_puts import _ibkr_candidates
@@ -223,7 +227,7 @@ class PutScanService:
             )
             candidates = _ibkr_candidates(real_provider, args, as_of, summary=summary)
             market_status = next((name for name, count in (
-                ("RealTime", summary.market_data_realtime), ("Frozen", summary.market_data_frozen),
+                ("Realtime", summary.market_data_realtime), ("Frozen", summary.market_data_frozen),
                 ("Delayed", summary.market_data_delayed), ("Not Subscribed", summary.market_data_not_subscribed),
             ) if count), None)
         ranked = tuple(rank_candidates(candidates))

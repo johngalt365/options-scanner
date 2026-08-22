@@ -112,12 +112,11 @@ class ClientPortalTransport:
             with urlopen(Request(url, headers={"Accept": "application/json"}), timeout=self.timeout, context=self._ssl_context) as response:
                 return json.load(response)
         except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
             if exc.code in (401, 403):
                 raise NotAuthenticatedError("Client Portal Gateway no tiene una sesión autenticada") from exc
-            raise GatewayUnavailableError(f"Gateway respondió HTTP {exc.code}: {body[:200]}") from exc
+            raise GatewayUnavailableError(f"Gateway respondió HTTP {exc.code}") from exc
         except (URLError, TimeoutError, OSError) as exc:
-            raise GatewayUnavailableError(f"no se pudo conectar con Client Portal Gateway: {exc}") from exc
+            raise GatewayUnavailableError("no se pudo conectar con Client Portal Gateway") from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise GatewayUnavailableError("Gateway devolvió una respuesta que no es JSON válido") from exc
         finally:
