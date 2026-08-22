@@ -293,7 +293,16 @@ class PrivateBetaMiddleware:
                                   and not action.startswith("watchlist_")
                                   and data.get("fake") != "1")
             if requests_live_scan and session.role != "operator":
-                return respond("403 Forbidden", [("Content-Type", "text/plain; charset=utf-8")], "IBKR live no está habilitado todavía para usuarios beta.".encode())
+                # The scan form is submitted with fetch and its renderer only
+                # accepts messages inside #scan-output.  Keep this policy
+                # denial at the security boundary, before the scanner, while
+                # returning the same safe HTML contract as scan responses.
+                message = "IBKR live no está habilitado todavía para usuarios beta."
+                body = (f'<div id="scan-output"><div class="error" role="alert">'
+                        f'{message}</div></div>').encode()
+                return respond("403 Forbidden", [("Content-Type", "text/html; charset=utf-8"),
+                                                  ("Content-Length", str(len(body))),
+                                                  ("Cache-Control", "no-store")], body)
         environ["options_scanner.user"] = session.user
         environ["options_scanner.role"] = session.role
         admitted = False

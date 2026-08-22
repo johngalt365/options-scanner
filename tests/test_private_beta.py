@@ -6,7 +6,9 @@ import tempfile
 import pytest
 
 from options_scanner.models import User, Watchlist
+from options_scanner.market_data import FakeMarketDataProvider
 from options_scanner.private_beta import PrivateBetaMiddleware, SQLiteWorkspaceStore
+from options_scanner.scan_service import PutScanService
 from options_scanner.web import create_app
 
 
@@ -219,15 +221,61 @@ def test_v2_database_repairs_wrong_non_unique_owner_name_index():
     tmp.close()
 
 
-def test_tester_demo_allowed_and_live_blocked():
-    tmp, store, app = fixture()
-    seen, _ = call(app, "/login", "POST", "username=ana&password=correct+horse+battery")
+def test_tester_real_scan_form_blocks_live_before_provider_and_allows_demo():
+    class ProviderSpy(FakeMarketDataProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def get_underlying(self, ticker):
+            self.calls.append(("underlying", ticker))
+            return super().get_underlying(ticker)
+
+        def get_option_market_data(self, ticker):
+            self.calls.append(("options", ticker))
+            return super().get_option_market_data(ticker)
+
+    class ServiceWithProvider(PutScanService):
+        def __init__(self, provider):
+            super().__init__()
+            self.provider = provider
+            self.requests = []
+
+        def run(self, request, **kwargs):
+            self.requests.append(request)
+            return super().run(request, provider=self.provider, **kwargs)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+    store = SQLiteWorkspaceStore(tmp.name)
+    store.add_login("tester1", "correct horse battery", "Tester One", role="tester")
+    provider = ProviderSpy()
+    service = ServiceWithProvider(provider)
+    app = PrivateBetaMiddleware(create_app(service, workspace_store=store), store,
+                                secure_cookies=False)
+
+    seen, _ = call(app, "/login", "POST", "username=tester1&password=correct+horse+battery")
     cookie = dict(seen["headers"])["Set-Cookie"].split(";", 1)[0]
     _, page = call(app, cookie=cookie)
     token = page.split(b'name="csrf_token" value="')[1].split(b'"')[0].decode()
-    assert call(app, "/", "POST", "csrf_token=" + token + "&fake=1", cookie)[0]["status"] == "200 OK"
-    seen, body = call(app, "/", "POST", "csrf_token=" + token, cookie)
-    assert seen["status"] == "403 Forbidden" and b"IBKR live" in body
+
+    # This is the complete payload emitted by the real scan form when its Demo
+    # checkbox is off: an unchecked checkbox contributes no ``fake`` field.
+    form = ("ticker=NVDA&universe_source=manual&min_dte=30&max_dte=45"
+            "&min_safety_margin=20&min_abs_delta=0.15&max_abs_delta=0.30"
+            "&min_iv=&min_short_theta=&historical_period=6m&csrf_token=" + token)
+    seen, body = call(app, "/", "POST", form, cookie)
+    assert seen["status"] == "403 Forbidden"
+    assert "IBKR live no está habilitado todavía para usuarios beta." in body.decode()
+    assert b'id="scan-output"' in body and b'role="alert"' in body
+    assert service.requests == []
+    assert provider.calls == []
+
+    seen, body = call(app, "/", "POST", form + "&fake=1", cookie)
+    assert seen["status"] == "200 OK"
+    assert service.requests[0].ticker == "NVDA" and service.requests[0].fake is True
+    assert ("underlying", "NVDA") in provider.calls
+    assert ("options", "NVDA") in provider.calls
+    assert b"Datos simulados" in body
     tmp.close()
 
 
