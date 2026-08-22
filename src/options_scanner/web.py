@@ -35,11 +35,15 @@ PREDEFINED_UNIVERSES: dict[str, tuple[str, tuple[str, ...]]] = {
 def parse_tickers(value: str) -> tuple[str, ...]:
     """Normalize and validate a comma/whitespace separated ticker list."""
     symbols = tuple(dict.fromkeys(part.upper() for part in TICKER_SEPARATOR.split(value.strip()) if part))
+    if len(value) > 512:
+        raise ValueError("Entrada de tickers demasiado larga.")
     if not symbols:
         raise ValueError("Introduce al menos un ticker válido.")
     # Reuse the domain request validation rather than creating a second symbol policy.
     for symbol in symbols:
         ScanRequest(ticker=symbol)
+    if len(symbols) > 20:
+        raise ValueError("Máximo 20 tickers por scan.")
     return symbols
 
 
@@ -827,7 +831,7 @@ main{{max-width:1700px;padding:1rem}}h1{{font-size:1.45rem}}form#scan-form{{disp
 <fieldset class="filter-group short-put-group"><legend>Short PUT</legend><div class="filter-controls"><label class="control"><span class="control-label">|Delta|: Min <span class="required-mark" aria-hidden="true">*</span> {help_icon('help-min-delta', '|Delta|', delta_help)}</span><input type="number" name="min_abs_delta" min="0" max="1" step="0.01" value="{escape(v['min_abs_delta'])}" required><small class="field-help">Valor absoluto</small></label><label class="control"><span class="control-label">|Delta|: Max <span class="required-mark" aria-hidden="true">*</span> {help_icon('help-max-delta', '|Delta|', delta_help)}</span><input type="number" name="max_abs_delta" min="0" max="1" step="0.01" value="{escape(v['max_abs_delta'])}" required><small class="field-help">Valor absoluto</small></label><label class="control"><span class="control-label">IV mínima (%) {help_icon('help-iv', 'IV mínima', iv_help)}</span><input type="number" name="min_iv" min="0" step="0.01" value="{escape(v['min_iv'])}" placeholder="Desactivado"><small class="field-help">Volatilidad contractual</small></label><label class="control"><span class="control-label">Theta short<br>mínimo {help_icon('help-theta', 'Theta short mínimo', theta_help)}</span><input type="number" name="min_short_theta" min="0" step="0.0001" value="{escape(v['min_short_theta'])}" placeholder="Desactivado"><small class="field-help">Exposición favorable</small></label></div></fieldset>
 <fieldset class="filter-group context-group"><legend>Contexto técnico</legend><div class="filter-controls"><label class="control"><span class="control-label">Histórico {help_icon('help-history', 'Histórico', history_help)}</span><select name="historical_period"><option value="3m"{' selected' if v['historical_period']=='3m' else ''}>3M</option><option value="6m"{' selected' if v['historical_period']=='6m' else ''}>6M</option><option value="1y"{' selected' if v['historical_period']=='1y' else ''}>1A</option><option value="multi"{' selected' if v['historical_period']=='multi' else ''}>Multi</option></select><small class="field-help">Contexto técnico, no requisito financiero</small></label></div></fieldset></div>
 <details class="filter-reference"><summary>ⓘ Cómo interpretar los filtros</summary><div class="reference-card"><table><thead><tr><th scope="col">Métrica</th><th scope="col">Interpretación educativa</th></tr></thead><tbody><tr><th scope="row">Delta</th><td>Delta contractual de la PUT; el scanner usa |Delta|. Menor valor suele corresponder a un strike más OTM y menor exposición direccional.</td></tr><tr><th scope="row">Theta short</th><td>Signo inverso del theta contractual, sin abs(). Positivo indica deterioro temporal teóricamente favorable al vendedor, no beneficio garantizado.</td></tr><tr><th scope="row">Theta %/día</th><td>Erosión temporal teórica diaria respecto a la prima. Es una aproximación, no una rentabilidad diaria garantizada.</td></tr><tr><th scope="row">IV</th><td>Volatilidad implícita: una IV mayor suele acompañar prima e incertidumbre esperada mayores.</td></tr><tr><th scope="row">Vega</th><td>Sensibilidad teórica del precio del contrato a cambios en la volatilidad implícita.</td></tr></tbody></table></div></details><div class="form-actions"><label class="mode"><input id="fake-mode" type="checkbox" name="fake" value="1"{checked}> Modo demostración</label><button id="scan-button" type="submit">Scan</button><button class="secondary-action" name="action" value="watchlist_from_manual" type="submit">Guardar entrada como lista</button></div></form><p id="demo-label" class="demo-label"{' hidden' if not checked else ''}>Datos simulados — no proceden de Interactive Brokers</p>
-<section class="watchlists"><h2>Watchlists</h2><p class="note">Estas listas se guardan solo en memoria y se perderán al reiniciar la aplicación.</p><button type="button" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">Nueva lista</button><form method="post" class="watchlist-row" hidden><label>Nombre<input name="watchlist_name" required></label><label>Tickers separados por coma o espacios<input name="watchlist_tickers" placeholder="NVDA, AAPL SPY" required></label><button name="action" value="watchlist_create" type="submit">Crear lista</button></form>{watchlist_rows}</section>
+<section class="watchlists"><h2>Watchlists</h2><p class="note">Estas listas pertenecen exclusivamente al usuario autenticado.</p><button type="button" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">Nueva lista</button><form method="post" class="watchlist-row" hidden><label>Nombre<input name="watchlist_name" maxlength="80" required></label><label>Tickers separados por coma o espacios<input name="watchlist_tickers" maxlength="512" placeholder="NVDA, AAPL SPY" required></label><button name="action" value="watchlist_create" type="submit">Crear lista</button></form>{watchlist_rows}</section>
 <div id="scan-status" class="scan-status" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><div><strong id="scan-title"></strong><span id="scan-source"></span><span>Tiempo transcurrido: <b id="scan-timer">00:00</b></span><span class="scan-legend">Estados: Pendiente / Analizando / Completado / Parcial / Error</span></div></div><div id="scan-output" aria-live="polite">{alert}{table}{_summary(result)}</div><script>
 const box=document.querySelector('#connection'),fake=document.querySelector('#fake-mode'),label=document.querySelector('#demo-label'),form=document.querySelector('#scan-form'),scanButton=document.querySelector('#scan-button'),scanStatus=document.querySelector('#scan-status'),scanOutput=document.querySelector('#scan-output'),timer=document.querySelector('#scan-timer');let scanning=false,interval;
 function elapsed(seconds){{const value=Math.floor(seconds);return String(Math.floor(value/60)).padStart(2,'0')+':'+String(value%60).padStart(2,'0')}}
@@ -856,7 +860,7 @@ document.addEventListener('toggle',async event=>{{
 
 def create_app(service: PutScanService | None = None, *, base_url: str = "https://localhost:5000/v1/api", status_transport: object | None = None,
                technical_price_provider=None, technical_history_provider=None, ticker_workers: int = 3,
-               global_http_limit: int = 8,
+               global_http_limit: int = 4,
                watchlists: dict[str, tuple[str, ...]] | None = None,
                workspace_store: UserWorkspaceStore | None = None, user: User | None = None):
     if not 1 <= ticker_workers <= 4:
@@ -866,16 +870,17 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
     scanner = service or PutScanService()
     transport = status_transport or __import__("options_scanner.ibkr", fromlist=["ClientPortalTransport"]).ClientPortalTransport(base_url, allow_insecure_tls=True, timeout=2.0)
     technical_cache: dict[str, TechnicalCheckResult] = {}
-    scan_cache: dict[str, ScanResult] = {}
+    scan_cache: dict[tuple[str, str], ScanResult] = {}
     store = workspace_store or UserWorkspaceStore()
-    current_user = user or User("local", "Usuario local")
+    default_user = user or User("local", "Usuario local")
     try:
-        store.watchlists_for(current_user.id)
+        store.watchlists_for(default_user.id)
     except KeyError:
-        store.add_user(current_user)
+        store.add_user(default_user)
     for key, symbols in (watchlists or {}).items():
-        store.save_watchlist(Watchlist(key, current_user.id, key, tuple(symbols)))
+        store.save_watchlist(Watchlist(key, default_user.id, key, tuple(symbols)))
     def application(environ, start_response):
+        current_user = environ.get("options_scanner.user", default_user)
         path = environ.get("PATH_INFO", "/")
         if path == "/technical-check" and environ.get("REQUEST_METHOD") == "GET":
             provider = technical_price_provider or IbkrMarketDataProvider(ClientPortalTransport(base_url, allow_insecure_tls=True))
@@ -893,7 +898,7 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
             return [body]
         if path == "/scan-chart" and environ.get("REQUEST_METHOD") == "GET":
             ticker = parse_qs(environ.get("QUERY_STRING", "")).get("ticker", [""])[0].upper()
-            cached = scan_cache.get(ticker)
+            cached = scan_cache.get((current_user.id, ticker))
             body = (_technical_chart(cached) if cached and cached.technical_context
                     else '<p role="status">Gráfico no disponible.</p>')
             status = "200 OK" if cached else "404 Not Found"
@@ -961,7 +966,7 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                         item = scanner.run(ScanRequest(ticker=ticker, **request_options),
                                            base_url=base_url, allow_insecure_tls=True,
                                            work_limiter=limiter)
-                        scan_cache[ticker] = item
+                        scan_cache[(current_user.id, ticker)] = item
                         return item
                     raw_results, multi_metrics = run_multi_ticker(
                         tickers, scan_one, ticker_workers=ticker_workers,
