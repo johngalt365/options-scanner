@@ -2,7 +2,8 @@ from io import BytesIO
 from dataclasses import replace
 from unittest import TestCase
 
-from options_scanner.ibkr import GatewayUnavailableError, NotAuthenticatedError
+from options_scanner.ibkr import (GatewayUnavailableError, IncompleteDataError,
+                                  NotAuthenticatedError, TickerNotFoundError)
 from options_scanner.scan_service import (DiscardedContract, PutScanService, ScanMetrics,
                                           ScanRequest, ScanResult)
 from options_scanner.scanner import PutScanCandidate
@@ -315,7 +316,7 @@ class WebTest(TestCase):
         page = render_page(multi_results=items).decode()
         self.assertEqual(page.count('class="ticker-detail"'), 14)
         self.assertEqual(page.count('<details class="ticker-detail" open'), 0)
-        self.assertIn("14 tickers · 0 con candidatos · 14 sin candidatos · 1.4 s · 0 error", page)
+        self.assertIn("0 completados · 0 parciales · 14 sin candidatos · 0 error · 1.4 s", page)
         for name in ("Todos", "Con candidatos", "Sin candidatos", "Soporte fuerte", "Cerca de S1"):
             self.assertIn(name, page)
         for heading in ("Ticker", "Precio", "Distancia S1", "Candidatos", "Delta",
@@ -630,9 +631,9 @@ class WebTest(TestCase):
 
     def test_four_connection_states_are_safe_and_accessible(self):
         cases = (
-            ({"authenticated": True, "connected": True}, None, "connected", "IBKR conectado"),
-            ({"authenticated": False, "connected": True}, None, "login", "IBKR requiere login"),
-            (None, RuntimeError("account=SECRET cookie=SECRET"), "disconnected", "IBKR desconectado"),
+            ({"authenticated": True, "connected": True}, None, "connected", "Realtime"),
+            ({"authenticated": False, "connected": True}, None, "login", "Login requerido"),
+            (None, RuntimeError("account=SECRET cookie=SECRET"), "disconnected", "Desconectado"),
         )
         for payload, error, state, text in cases:
             with self.subTest(state=state):
@@ -651,7 +652,7 @@ class WebTest(TestCase):
         body = b"".join(app(environ, lambda status, headers: captured.update(status=status))).decode()
         self.assertEqual(captured["status"], "200 OK")
         self.assertEqual(transport.calls, [("/iserver/auth/status", {})])
-        self.assertIn("IBKR conectado", body)
+        self.assertIn("Realtime", body)
         self.assertNotIn("SECRET", body)
 
     def test_demo_post_and_empty_result_are_rendered(self):
@@ -808,6 +809,50 @@ class WebTest(TestCase):
         self.assertIn("Revisa los parámetros", page)
         self.assertNotIn("Traceback", page)
 
+    def test_cross_field_and_ticker_validation_messages_are_specific(self):
+        cases = (
+            (FORM.replace("min_dte=30", "min_dte=46"),
+             "DTE mínimo no puede ser mayor que DTE máximo."),
+            (FORM.replace("min_abs_delta=0.15", "min_abs_delta=0.40"),
+             "|Delta| mínimo no puede ser mayor que |Delta| máximo."),
+            (FORM.replace("ticker=NVDA", "ticker="),
+             "Introduce al menos un ticker válido."),
+            (FORM.replace("ticker=NVDA", "ticker=%24BAD"),
+             "El ticker debe ser un símbolo válido."),
+        )
+        for body, message in cases:
+            with self.subTest(message=message):
+                status, page = request(create_app(StubService()), "POST", body)
+                self.assertEqual(status, "400 Bad Request")
+                self.assertIn(message, page)
+                self.assertNotIn("Traceback", page)
+
+    def test_empty_result_reasons_and_degraded_multi_summary_are_distinct(self):
+        filtered = ScanResult((), ScanMetrics(considered=4, rejected_delta=4), .1)
+        incomplete = ScanResult((), ScanMetrics(considered=4, incomplete=4), .1)
+        timeout = ScanResult((), ScanMetrics(considered=2, timed_out=True,
+                                             target_contracts=5,
+                                             unresolved_contracts_timeout=3), .1)
+        failed = "token=SECRET cookie=SECRET /private/path"
+        page = render_page(multi_results=(
+            ("FILTER", filtered, None), ("DATA", incomplete, None),
+            ("SLOW", timeout, None), ("BAD", None, failed),
+        )).decode()
+        self.assertIn("0 candidatos porque ningún contrato cumplió los filtros", page)
+        self.assertIn("0 candidatos porque no hubo datos suficientes", page)
+        self.assertIn("Resultado parcial por timeout", page)
+        self.assertIn("0 completados · 1 parciales · 2 sin candidatos · 1 error", page)
+        self.assertNotIn("SECRET", page)
+        self.assertNotIn("/private/path", page)
+
+        class AllFail(StubService):
+            def run(self, scan_request, **kwargs):
+                raise RuntimeError(f"{scan_request.ticker} {failed}")
+        _, safe_page = request(create_app(AllFail()), "POST", FORM.replace("NVDA", "BAD%2CFAIL"))
+        self.assertIn("0 completados · 0 parciales · 0 sin candidatos · 2 error", safe_page)
+        self.assertNotIn("SECRET", safe_page)
+        self.assertNotIn("/private/path", safe_page)
+
     def test_gateway_and_session_errors_are_safe(self):
         cases = (
             (GatewayUnavailableError("secret payload"), "No se pudo conectar"),
@@ -819,6 +864,18 @@ class WebTest(TestCase):
                 self.assertEqual(status, "503 Service Unavailable")
                 self.assertIn(message, page)
                 self.assertNotIn(str(error), page)
+
+    def test_unresolved_ticker_and_unusable_chain_are_distinct_and_safe(self):
+        cases = (
+            (TickerNotFoundError("ticker=SECRET"), "Ticker no resuelto."),
+            (IncompleteDataError("payload=SECRET"), "Ticker sin cadena de opciones utilizable"),
+        )
+        for error, message in cases:
+            with self.subTest(error=type(error).__name__):
+                status, page = request(create_app(StubService(error=error)), "POST", FORM)
+                self.assertEqual(status, "422 Unprocessable Entity")
+                self.assertIn(message, page)
+                self.assertNotIn("SECRET", page)
 
     def test_post_preserves_escaped_input(self):
         status, page = request(create_app(StubService()), "POST", FORM.replace("NVDA", "%3Cscript%3E"))

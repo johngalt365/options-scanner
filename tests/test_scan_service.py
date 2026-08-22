@@ -43,7 +43,7 @@ class ScanRequestTest(TestCase):
         result = service.run(ScanRequest(fake=True, min_abs_delta=.9, max_abs_delta=1))
         self.assertEqual(result.candidates, ())
         self.assertEqual(result.underlying_price, 100.0)
-        self.assertEqual(result.market_data_status, "Simulado")
+        self.assertEqual(result.market_data_status, "Demo")
         self.assertTrue(result.simulated)
         self.assertIsNotNone(result.updated_at)
         self.assertIsNotNone(result.technical_context)

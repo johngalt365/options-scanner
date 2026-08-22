@@ -10,7 +10,8 @@ from uuid import uuid4
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
-from options_scanner.ibkr import GatewayUnavailableError, IbkrError, NotAuthenticatedError
+from options_scanner.ibkr import (GatewayUnavailableError, IbkrError, IncompleteDataError,
+                                  NotAuthenticatedError, TickerNotFoundError)
 from options_scanner.scan_service import PutScanService, ScanRequest, ScanResult
 from options_scanner.historical import HistoricalPeriod
 from options_scanner.technical_context import (StrikePosition,
@@ -35,7 +36,7 @@ def parse_tickers(value: str) -> tuple[str, ...]:
     """Normalize and validate a comma/whitespace separated ticker list."""
     symbols = tuple(dict.fromkeys(part.upper() for part in TICKER_SEPARATOR.split(value.strip()) if part))
     if not symbols:
-        raise ValueError("Debes indicar al menos un ticker.")
+        raise ValueError("Introduce al menos un ticker válido.")
     # Reuse the domain request validation rather than creating a second symbol policy.
     for symbol in symbols:
         ScanRequest(ticker=symbol)
@@ -63,7 +64,35 @@ def resolve_universe(source: str, manual_value: str,
 
 
 def _scan_state(result: ScanResult) -> str:
-    return "Parcial" if result.summary.timed_out or result.summary.historical_status == "error" else "Completado"
+    if result.summary.timed_out:
+        return "parcial"
+    if result.candidates:
+        return "completado"
+    return "sin candidatos"
+
+
+def _safe_ticker_error(message: str | None) -> str:
+    allowed = {
+        "Sesión de IBKR no autenticada.",
+        "Client Portal Gateway no está disponible.",
+        "IBKR no pudo completar este ticker.",
+        "No se pudo completar este ticker.",
+        "Ticker no resuelto.",
+        "Ticker sin cadena de opciones utilizable.",
+    }
+    return message if message in allowed else "No se pudo completar este ticker."
+
+
+def _empty_result_message(result: ScanResult) -> str:
+    """Explain an empty result without conflating filters and missing data."""
+    summary = result.summary
+    if summary.timed_out:
+        return "Resultado parcial por timeout; no se evaluaron todos los contratos."
+    if summary.incomplete or summary.failed_contracts or summary.unresolved_contracts_timeout:
+        return "0 candidatos porque no hubo datos suficientes para evaluar contratos completos."
+    if summary.considered == 0 and summary.target_contracts == 0:
+        return "Ticker sin cadena de opciones utilizable."
+    return "0 candidatos porque ningún contrato cumplió los filtros."
 
 
 def render_technical_screener(results: tuple[TechnicalCheckResult, ...]) -> bytes:
@@ -124,11 +153,11 @@ def ibkr_connection_status(transport: object) -> dict[str, str]:
         data = transport.get("/iserver/auth/status", {})
         ready = isinstance(data, dict) and bool(data.get("authenticated")) and bool(data.get("connected", True))
         if ready:
-            return {"state": "connected", "text": "IBKR conectado", "message": "Gateway y sesión disponibles."}
-        return {"state": "login", "text": "IBKR requiere login", "message": "Gateway accesible; inicia sesión manualmente."}
+            return {"state": "connected", "text": "Realtime", "message": "Gateway y sesión disponibles."}
+        return {"state": "login", "text": "Login requerido", "message": "Gateway accesible; inicia sesión manualmente."}
     except Exception:
-        logger.info("IBKR status check failed", exc_info=True)
-        return {"state": "disconnected", "text": "IBKR desconectado", "message": "No se pudo contactar con Client Portal Gateway."}
+        logger.info("IBKR status check failed")
+        return {"state": "disconnected", "text": "Desconectado", "message": "No se pudo contactar con Client Portal Gateway."}
 
 
 def _number(value: object, digits: int = 2) -> str:
@@ -377,7 +406,8 @@ def _interpretation(result: ScanResult | None) -> str:
         if inside:
             messages.append(("neutral", f"{len(inside)} candidatos tienen strikes dentro de zonas de soporte activas."))
     else:
-        messages.append(("neutral", "No se encontraron candidatos que cumplan todos los filtros."))
+        css_class = "warning" if summary.incomplete or summary.failed_contracts else "neutral"
+        messages.append((css_class, _empty_result_message(result)))
 
     if summary.timed_out:
         messages.append((
@@ -594,7 +624,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
         -(item[1].candidates[0].evaluation.total_score if item[1] and item[1].candidates and item[1].candidates[0].evaluation else -1),
         item[0])))
     rows = []
-    with_candidates = errors = 0
+    completed = partial = no_candidates = errors = 0
     elapsed = 0.0
     multi_mode = any(result and result.technical_context and
                      result.technical_context.period == HistoricalPeriod.MULTI
@@ -604,15 +634,18 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
     def badge(state: str | None) -> str:
         value = state or "N/D"
         lowered = value.lower()
-        kind = "frozen" if "frozen" in lowered else "delayed" if "delayed" in lowered else "realtime" if "realtime" in lowered else "na"
-        short = "Frozen" if kind == "frozen" else "Delayed" if kind == "delayed" else "RealTime" if kind == "realtime" else "N/D"
+        kind = ("frozen" if "frozen" in lowered else "delayed" if "delayed" in lowered else
+                "realtime" if "realtime" in lowered else "demo" if "demo" in lowered else "na")
+        short = ("Frozen" if kind == "frozen" else "Delayed" if kind == "delayed" else
+                 "Realtime" if kind == "realtime" else "Demo" if kind == "demo" else "N/D")
         return f'<span class="status-badge {kind}" title="{escape(value)}">{short}</span>'
     for ticker, result, item_error in items:
         if result is None:
             errors += 1
             cells = ((f'<button type="button" class="ticker-link detail-trigger" aria-label="Ver detalle de {escape(ticker)}">{escape(ticker)}</button>', ticker),
                      ("N/D", ""), (badge(None), "")) + tuple(("N/D", "") for _ in range(17))
-            detail = f'<div class="row-error" role="status">{escape(item_error or "No se pudo completar este ticker.")}</div>'
+            detail = (f'<div class="row-error" role="status"><strong>error</strong> · '
+                      f'{escape(_safe_ticker_error(item_error))}</div>')
             row_class = "error-result"
         else:
             elapsed += result.elapsed_seconds
@@ -620,7 +653,13 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
             support = context.supports_below_price[0] if context and context.supports_below_price else None
             distance_s = distance_to_zone_percent(result.underlying_price, support) if result.underlying_price else None
             best = result.candidates[0] if result.candidates else None
-            with_candidates += bool(best)
+            state = _scan_state(result)
+            if state == "parcial":
+                partial += 1
+            elif state == "completado":
+                completed += 1
+            else:
+                no_candidates += 1
             if multi_mode and context:
                 if best:
                     relationship, support_value, horizon_value, strike_value = _confluence_strike_values(best, context)
@@ -665,7 +704,9 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
                  (relationship.position_label if best and multi_mode and context else
                   _strike_context_label(best) if best else "")),
             )
-            detail = (_result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
+            outcome = (f'<p class="ticker-outcome" role="status"><strong>{state}</strong>'
+                       + (f' · {escape(_empty_result_message(result))}' if not best else '') + '</p>')
+            detail = (outcome + _result_heading(result, ticker) + _technical_chart(result, lazy=True) + _interpretation(result) +
                       _evaluation_section(best, len(result.candidates)) +
                       (f'<p class="strike-explanation">{escape(_strike_support_explanation(best, context))}</p>' if best else '') +
                       '<h3>Candidatos PUT completos</h3><div class="scroll"><table class="candidate-table"><thead><tr>' +
@@ -706,7 +747,7 @@ def _multi_screener(items: tuple[tuple[str, ScanResult | None, str | None], ...]
               f'{metrics.ticker_seconds_p50:.1f}/{metrics.ticker_seconds_p95:.1f} s'
               if metrics else f' · {elapsed:.1f} s')
     return ('<section class="screener" aria-labelledby="screener-title"><h2 id="screener-title">Screener multi-ticker</h2>'
-            f'<div class="scan-summary" role="status">{total} tickers · {with_candidates} con candidatos · {total-with_candidates-errors} sin candidatos{timing} · {errors} error</div>'
+            f'<div class="scan-summary" role="status">{completed} completados · {partial} parciales · {no_candidates} sin candidatos · {errors} error{timing}</div>'
             '<div class="quick-filters" role="group" aria-label="Filtros rápidos"><button type="button" class="active" data-filter="all">Todos</button><button type="button" data-filter="has-candidates">Con candidatos</button><button type="button" data-filter="no-candidates">Sin candidatos</button><button type="button" data-filter="strong">Soporte fuerte</button><button type="button" data-filter="near">Cerca de S1</button><button type="button" data-filter="strike-above">Strike sobre soporte</button><button type="button" data-filter="strike-inside">Strike dentro soporte</button><button type="button" data-filter="strike-below">Strike bajo soporte</button></div>'
             '<div class="scroll"><table class="screener-table"><thead><tr><th class="detail-launch"><span class="sr-only">Abrir detalle</span></th>' + rendered_headers + '<th>Acción</th>' +
             '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></section>')
@@ -925,6 +966,8 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                     def safe_error(ticker, exc):
                         if isinstance(exc, NotAuthenticatedError): return "Sesión de IBKR no autenticada."
                         if isinstance(exc, GatewayUnavailableError): return "Client Portal Gateway no está disponible."
+                        if isinstance(exc, TickerNotFoundError): return "Ticker no resuelto."
+                        if isinstance(exc, IncompleteDataError): return "Ticker sin cadena de opciones utilizable."
                         if isinstance(exc, IbkrError): return "IBKR no pudo completar este ticker."
                         logger.error("Unexpected multi-ticker scan failure for %s (%s)", ticker, type(exc).__name__)
                         return "No se pudo completar este ticker."
@@ -932,16 +975,36 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
                                           for ticker, item, exc in raw_results)
             except StopIteration:
                 pass
-            except (ValueError, KeyError):
+            except ValueError as exc:
+                safe_validation_messages = {
+                    "Introduce al menos un ticker válido.",
+                    "El ticker debe ser un símbolo válido.",
+                    "Los valores DTE no pueden ser negativos.",
+                    "DTE mínimo no puede ser mayor que DTE máximo.",
+                    "La distancia al strike debe estar entre 0 % y 100 %.",
+                    "Los valores de |Delta| deben estar entre 0 y 1.",
+                    "|Delta| mínimo no puede ser mayor que |Delta| máximo.",
+                    "La IV mínima no puede ser negativa.",
+                    "El theta short mínimo no puede ser negativo.",
+                }
+                message = str(exc)
+                error = (message if message in safe_validation_messages else
+                         "Revisa los parámetros del formulario e inténtalo de nuevo.")
+                status = "400 Bad Request"
+            except KeyError:
                 error, status = "Revisa los parámetros del formulario e inténtalo de nuevo.", "400 Bad Request"
             except NotAuthenticatedError:
                 error, status = "Client Portal Gateway está disponible, pero la sesión de IBKR no está autenticada.", "503 Service Unavailable"
             except GatewayUnavailableError:
                 error, status = "No se pudo conectar con Client Portal Gateway. Inícialo y comprueba la sesión.", "503 Service Unavailable"
+            except TickerNotFoundError:
+                error, status = "Ticker no resuelto.", "422 Unprocessable Entity"
+            except IncompleteDataError:
+                error, status = "Ticker sin cadena de opciones utilizable o sin datos suficientes.", "422 Unprocessable Entity"
             except IbkrError:
                 error, status = "IBKR no pudo completar el scan. Comprueba Gateway y vuelve a intentarlo.", "502 Bad Gateway"
             except Exception:
-                logger.exception("Unexpected web scan failure")
+                logger.error("Unexpected web scan failure")
                 error, status = "No se pudo completar el scan. Inténtalo de nuevo.", "500 Internal Server Error"
         current_watchlists = {item.id: item for item in store.watchlists_for(current_user.id)}
         body = render_page(values, result, error, multi_results, multi_metrics,
