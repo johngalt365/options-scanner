@@ -31,6 +31,8 @@ SECURITY_HEADERS = (
 class SQLiteWorkspaceStore:
     """SQLite implementation of the workspace port; every query includes owner."""
 
+    request_identity_required = True
+
     def __init__(self, path: str):
         self.path = path
         self._initialize()
@@ -66,15 +68,18 @@ class SQLiteWorkspaceStore:
             raise ValueError("ya existe el usuario") from exc
 
     def add_login(self, username: str, password: str, display_name: str, role="tester") -> str:
-        if not username or len(password) < 12 or role not in {"tester", "operator"}:
-            raise ValueError("usuario inválido o contraseña menor de 12 caracteres")
+        if not username.strip() or not display_name.strip() or len(password) < 12 or role not in {"tester", "operator"}:
+            raise ValueError("username/display name inválido o contraseña menor de 12 caracteres")
         user_id = uuid4().hex
         salt = secrets.token_bytes(16)
         digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
         encoded = f"scrypt$16384$8$1${salt.hex()}${digest.hex()}"
-        with self._connect() as db:
-            db.execute("INSERT INTO users(id,display_name,username,password_hash,role) VALUES(?,?,?,?,?)",
-                       (user_id, display_name, username, encoded, role))
+        try:
+            with self._connect() as db:
+                db.execute("INSERT INTO users(id,display_name,username,password_hash,role) VALUES(?,?,?,?,?)",
+                           (user_id, display_name.strip(), username.strip(), encoded, role))
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"ya existe el username '{username}'") from exc
         return user_id
 
     def authenticate(self, username: str, password: str):
@@ -85,7 +90,7 @@ class SQLiteWorkspaceStore:
             return None
         _, n, r, p, salt, expected = row[2].split("$")
         actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=int(n), r=int(r), p=int(p))
-        return (User(row[0], row[1]), row[3]) if hmac.compare_digest(actual, bytes.fromhex(expected)) else None
+        return (User(row[0], row[1]), row[3], username) if hmac.compare_digest(actual, bytes.fromhex(expected)) else None
 
     def watchlists_for(self, user_id: str):
         self._require_user(user_id)
@@ -125,6 +130,7 @@ class SQLiteWorkspaceStore:
 class _Session:
     user: User
     role: str
+    username: str
     csrf: str
     expires: float
 
@@ -171,7 +177,8 @@ class PrivateBetaMiddleware:
             authenticated = self.store.authenticate(data.get("username", "")[:80], data.get("password", "")[:256])
             if not authenticated:
                 return respond("401 Unauthorized", [("Content-Type", "text/html; charset=utf-8")], self._login_page("Credenciales no válidas."))
-            sid = secrets.token_urlsafe(32); session = _Session(*authenticated, secrets.token_urlsafe(32), time.time() + self.session_seconds)
+            user, role, username = authenticated
+            sid = secrets.token_urlsafe(32); session = _Session(user, role, username, secrets.token_urlsafe(32), time.time() + self.session_seconds)
             with self._lock: self._sessions[sid] = session
             flags = "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + str(self.session_seconds) + ("; Secure" if self.secure_cookies else "")
             return respond("303 See Other", [("Location", "/"), ("Set-Cookie", "beta_session=" + sid + flags)])
@@ -223,6 +230,17 @@ class PrivateBetaMiddleware:
             content_type = next((v for k, v in captured[1] if k.lower() == "content-type"), "")
             if "text/html" in content_type:
                 hidden = ('<input type="hidden" name="csrf_token" value="' + session.csrf + '">').encode()
+                from html import escape
+                session_ui = (
+                    '<aside class="session-summary" aria-label="Sesión">'
+                    f'<span>Usuario: <strong>{escape(session.username)}</strong> '
+                    f'({escape(session.user.display_name)})</span> '
+                    f'<span>Rol: <strong>{escape(session.role)}</strong></span> '
+                    '<form method="post" action="/logout"><button type="submit">Cerrar sesión</button></form>'
+                    '</aside>'
+                ).encode()
+                with_session = re.sub(br"(<body\b[^>]*>)", lambda match: match.group(1) + session_ui, body, count=1)
+                body = with_session if with_session != body else session_ui + body
                 body = re.sub(br"(<form\b[^>]*>)", lambda match: match.group(1) + hidden, body)
                 captured[1] = [(k, v) for k, v in captured[1] if k.lower() != "content-length"]
                 captured[1].append(("Content-Length", str(len(body))))

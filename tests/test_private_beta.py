@@ -74,3 +74,15 @@ def test_tester_demo_allowed_and_live_blocked():
     seen, body = call(app, "/", "POST", "csrf_token=" + token, cookie)
     assert seen["status"] == "403 Forbidden" and b"IBKR live" in body
     tmp.close()
+
+
+def test_authenticated_ui_shows_identity_role_and_post_logout():
+    tmp, store, app = fixture()
+    seen, _ = call(app, "/login", "POST", "username=ana&password=correct+horse+battery")
+    cookie = dict(seen["headers"])["Set-Cookie"].split(";", 1)[0]
+    _, page = call(app, cookie=cookie)
+    assert b"Usuario: <strong>ana</strong>" in page
+    assert b"Rol: <strong>tester</strong>" in page
+    assert b'action="/logout"' in page and b"Cerrar sesi" in page
+    logout = page.split(b'action="/logout"', 1)[1].split(b"</form>", 1)[0]
+    assert b'name="csrf_token"' in logout
