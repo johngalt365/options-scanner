@@ -231,6 +231,37 @@ def test_tester_demo_allowed_and_live_blocked():
     tmp.close()
 
 
+def test_tester_can_create_update_and_delete_own_watchlist_via_post():
+    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+    store = SQLiteWorkspaceStore(tmp.name)
+    store.add_login("tester1", "correct horse battery", "Tester One")
+    app = PrivateBetaMiddleware(create_app(workspace_store=store), store)
+
+    seen, _ = call(app, "/login", "POST", "username=tester1&password=correct+horse+battery")
+    cookie = dict(seen["headers"])["Set-Cookie"].split(";", 1)[0]
+    _, page = call(app, cookie=cookie)
+    token = page.split(b'name="csrf_token" value="')[1].split(b'"')[0].decode()
+
+    create = ("csrf_token=" + token
+              + "&action=watchlist_create&watchlist_name=Core&watchlist_tickers=NVDA%2C+SPY")
+    seen, body = call(app, "/", "POST", create, cookie)
+    assert seen["status"] == "200 OK"
+    assert b"Watchlist guardada." in body
+    item = store.watchlists_for(store.authenticate("tester1", "correct horse battery")[0].id)[0]
+    assert item.name == "Core" and item.symbols == ("NVDA", "SPY")
+
+    update = ("csrf_token=" + token + "&action=watchlist_update&watchlist_id=" + item.id
+              + "&watchlist_name=Growth&watchlist_tickers=QQQ%2C+MSFT")
+    assert call(app, "/", "POST", update, cookie)[0]["status"] == "200 OK"
+    updated = store.watchlists_for(item.user_id)[0]
+    assert updated.name == "Growth" and updated.symbols == ("QQQ", "MSFT")
+
+    delete = "csrf_token=" + token + "&action=watchlist_delete&watchlist_id=" + item.id
+    assert call(app, "/", "POST", delete, cookie)[0]["status"] == "200 OK"
+    assert store.watchlists_for(item.user_id) == ()
+    tmp.close()
+
+
 def test_authenticated_ui_shows_identity_role_and_post_logout():
     tmp, store, app = fixture()
     seen, _ = call(app, "/login", "POST", "username=ana&password=correct+horse+battery")

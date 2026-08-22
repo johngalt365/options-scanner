@@ -288,7 +288,11 @@ class PrivateBetaMiddleware:
             data = form_data = self._form(environ); token = data.get("csrf_token", "")
             if not hmac.compare_digest(token, session.csrf):
                 return respond("403 Forbidden", [("Content-Type", "text/plain")], b"CSRF validation failed")
-            if data.get("fake") != "1" and session.role != "operator":
+            action = data.get("action", "scan")
+            requests_live_scan = (path == "/" and method == "POST"
+                                  and not action.startswith("watchlist_")
+                                  and data.get("fake") != "1")
+            if requests_live_scan and session.role != "operator":
                 return respond("403 Forbidden", [("Content-Type", "text/plain; charset=utf-8")], "IBKR live no está habilitado todavía para usuarios beta.".encode())
         environ["options_scanner.user"] = session.user
         environ["options_scanner.role"] = session.role
