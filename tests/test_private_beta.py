@@ -3,8 +3,11 @@ import json
 import sqlite3
 import tempfile
 
+import pytest
+
 from options_scanner.models import User, Watchlist
 from options_scanner.private_beta import PrivateBetaMiddleware, SQLiteWorkspaceStore
+from options_scanner.web import create_app
 
 
 def call(app, path="/", method="GET", body="", cookie=""):
@@ -119,6 +122,100 @@ def test_legacy_duplicate_migration_keeps_oldest_id_and_merges_tickers():
                    for row in db.execute("PRAGMA index_list(watchlists)"))
     # A second logical restart proves that the migration is idempotent.
     assert SQLiteWorkspaceStore(tmp.name).watchlists_for("a") == store.watchlists_for("a")
+    tmp.close()
+
+
+def test_v2_database_with_legacy_keys_and_duplicates_is_repaired_on_every_startup():
+    """Reproduce the inconsistent shape observed in a pre-existing beta DB."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+    with sqlite3.connect(tmp.name) as db:
+        db.executescript("""
+            CREATE TABLE schema_version(version INTEGER PRIMARY KEY);
+            INSERT INTO schema_version VALUES(2);
+            CREATE TABLE users(
+              id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+              username TEXT UNIQUE, password_hash TEXT, role TEXT NOT NULL DEFAULT 'tester',
+              enabled INTEGER NOT NULL DEFAULT 1);
+            INSERT INTO users(id,display_name,username,role)
+              VALUES('operator-id','Operator One','operator1','operator');
+            INSERT INTO users(id,display_name,username)
+              VALUES('other-id','Other','other');
+            CREATE TABLE watchlists(
+              id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
+              symbols TEXT NOT NULL, name_key TEXT);
+            CREATE INDEX watchlists_owner ON watchlists(user_id);
+            CREATE UNIQUE INDEX watchlists_owner_name
+              ON watchlists(user_id,name_key);
+            CREATE TRIGGER watchlists_name_key_insert
+              BEFORE INSERT ON watchlists WHEN NEW.name_key IS NULL OR NEW.name_key = ''
+              BEGIN SELECT RAISE(ABORT, 'watchlist name key required'); END;
+            CREATE TRIGGER watchlists_name_key_update
+              BEFORE UPDATE OF name_key ON watchlists WHEN NEW.name_key IS NULL OR NEW.name_key = ''
+              BEGIN SELECT RAISE(ABORT, 'watchlist name key required'); END;
+            CREATE TABLE preferences(user_id TEXT, key TEXT, value TEXT);
+        """)
+        db.execute(
+            "INSERT INTO watchlists VALUES(?,?,?,?,?)",
+            ("oldest", "operator-id", "Techbeta", json.dumps(["NVDA", "AAPL"]), "Techbeta"),
+        )
+        db.execute(
+            "INSERT INTO watchlists VALUES(?,?,?,?,?)",
+            ("newer", "operator-id", "Techbeta", json.dumps(["AAPL", "MSFT"]), "TECHBETA"),
+        )
+        before = db.execute(
+            "SELECT id,user_id,name,name_key,symbols,rowid FROM watchlists ORDER BY rowid"
+        ).fetchall()
+        assert len(before) == 2 and {row[3] for row in before} == {"Techbeta", "TECHBETA"}
+
+    store = SQLiteWorkspaceStore(tmp.name)
+    expected = (Watchlist("oldest", "operator-id", "Techbeta", ("NVDA", "AAPL", "MSFT")),)
+    assert store.watchlists_for("operator-id") == expected
+    with sqlite3.connect(tmp.name) as db:
+        assert db.execute(
+            "SELECT id,user_id,name,name_key,symbols,rowid FROM watchlists"
+        ).fetchone() == (
+            "oldest", "operator-id", "Techbeta", "techbeta",
+            json.dumps(["NVDA", "AAPL", "MSFT"]), before[0][5],
+        )
+        index = next(row for row in db.execute("PRAGMA index_list(watchlists)")
+                     if row[1] == "watchlists_owner_name")
+        assert index[2] == 1
+        assert tuple(row[2] for row in db.execute(
+            "PRAGMA index_info(watchlists_owner_name)")) == ("user_id", "name_key")
+
+    app = create_app(workspace_store=store, user=User("operator-id", "Operator One"))
+    for _ in range(2):  # initial render and browser refresh
+        status, page = call(app)
+        assert status["status"] == "200 OK"
+        text = page.decode()
+        assert text.count("Watchlist: Techbeta") == 1
+        assert text.count('value="Techbeta"') == 1
+
+    restarted = SQLiteWorkspaceStore(tmp.name)
+    assert restarted.watchlists_for("operator-id") == expected
+    with pytest.raises(ValueError, match="Ya existe"):
+        restarted.save_watchlist(Watchlist("duplicate", "operator-id", "TECHBETA", ("SPY",)))
+    restarted.save_watchlist(Watchlist("other-copy", "other-id", "techbeta", ("SPY",)))
+    assert len(restarted.watchlists_for("operator-id")) == 1
+    assert len(restarted.watchlists_for("other-id")) == 1
+    tmp.close()
+
+
+def test_v2_database_repairs_wrong_non_unique_owner_name_index():
+    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+    store = SQLiteWorkspaceStore(tmp.name)
+    store.add_user(User("a", "A"))
+    with sqlite3.connect(tmp.name) as db:
+        db.execute("DROP INDEX watchlists_owner_name")
+        db.execute("CREATE INDEX watchlists_owner_name ON watchlists(name_key)")
+
+    SQLiteWorkspaceStore(tmp.name)
+    with sqlite3.connect(tmp.name) as db:
+        index = next(row for row in db.execute("PRAGMA index_list(watchlists)")
+                     if row[1] == "watchlists_owner_name")
+        assert index[2] == 1
+        assert tuple(row[2] for row in db.execute(
+            "PRAGMA index_info(watchlists_owner_name)")) == ("user_id", "name_key")
     tmp.close()
 
 

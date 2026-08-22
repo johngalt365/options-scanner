@@ -63,7 +63,13 @@ class SQLiteWorkspaceStore:
 
     @staticmethod
     def _migrate_watchlist_names(db):
-        """Merge legacy duplicates, retaining the oldest row and every ticker."""
+        """Repair and upgrade watchlist names, regardless of recorded version.
+
+        Rows are read before any mutation, then redundant rows are removed before
+        their keeper is normalized.  That order matters for partially upgraded
+        databases whose unique index still contains distinct, non-normalized
+        keys which normalize to the same value.
+        """
         columns = {row[1] for row in db.execute("PRAGMA table_info(watchlists)")}
         if "name_key" not in columns:
             db.execute("ALTER TABLE watchlists ADD COLUMN name_key TEXT")
@@ -81,12 +87,26 @@ class SQLiteWorkspaceStore:
                 for symbol in json.loads(row[4]):
                     if symbol not in merged:
                         merged.append(symbol)
+            # Delete first: an already-present unique index may otherwise reject
+            # changing the keeper's legacy key to a duplicate's normalized key.
+            for row, _ in duplicates[1:]:
+                db.execute("DELETE FROM watchlists WHERE rowid=?", (row[0],))
             db.execute(
                 "UPDATE watchlists SET name=?,name_key=?,symbols=? WHERE rowid=?",
                 (display_name, name_key, json.dumps(merged), keeper[0]),
             )
-            for row, _ in duplicates[1:]:
-                db.execute("DELETE FROM watchlists WHERE rowid=?", (row[0],))
+
+        # CREATE INDEX IF NOT EXISTS would silently accept an index with the
+        # expected name but the wrong uniqueness/columns.  Validate its shape so
+        # startup can also self-heal an interrupted or manually altered v2 DB.
+        indexes = {row[1]: row for row in db.execute("PRAGMA index_list(watchlists)")}
+        owner_name = indexes.get("watchlists_owner_name")
+        if owner_name is not None:
+            columns = tuple(
+                row[2] for row in db.execute("PRAGMA index_info(watchlists_owner_name)")
+            )
+            if not owner_name[2] or columns != ("user_id", "name_key"):
+                db.execute("DROP INDEX watchlists_owner_name")
         db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS watchlists_owner_name "
             "ON watchlists(user_id,name_key)"
