@@ -362,6 +362,21 @@ class WebTest(TestCase):
                      "max_abs_delta", "historical_period", "fake"):
             self.assertIn(f'name="{name}"', page)
 
+    def test_watchlist_create_and_edit_rows_share_compact_column_structure(self):
+        page = render_page(watchlists={
+            "core": __import__("options_scanner.models", fromlist=["Watchlist"]).Watchlist(
+                "core", "local", "Core", ("NVDA", "SPY"))
+        }).decode()
+
+        self.assertEqual(page.count('class="watchlist-row"'), 2)
+        self.assertEqual(page.count('class="watchlist-actions"'), 2)
+        self.assertEqual(page.count('<label>Nombre<input name="watchlist_name"'), 2)
+        self.assertEqual(page.count('<label>Tickers<input name="watchlist_tickers"'), 2)
+        self.assertIn("grid-template-columns:minmax(9rem,.7fr) minmax(16rem,2fr) 10.5rem", page)
+        self.assertIn(".watchlist-row input{box-sizing:border-box;width:100%;height:2.15rem", page)
+        self.assertIn(".watchlist-row button{height:2.15rem", page)
+        self.assertIn(".watchlist-actions{grid-column:1/-1", page)
+
     def test_filter_panel_groups_controls_aligns_labels_and_exposes_help(self):
         page = render_page().decode()
 
