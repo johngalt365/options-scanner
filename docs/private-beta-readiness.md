@@ -140,6 +140,15 @@ un proveedor apto para una aplicación multiusuario.
 | Caché de contratos IBKR | Mutable por instancia; datos no personales | Instancia compartida sólo como servicio de market data, nunca como contexto de cuenta; locks/TTL/máximo |
 | Concurrencia | Semáforo por llamada a `run_multi_ticker`, no global entre requests | Un limitador/cola de proceso único para todos los requests y usuarios |
 
+### Unicidad y migración de nombres de watchlist
+
+SQLite mantiene una clave de nombre NFKC, sin espacios exteriores o repetidos y
+con *casefold*, protegida por un índice único `(user_id, name_key)`. Al abrir una
+base anterior, la migración agrupa duplicados por propietario y clave: conserva
+el `id` de la fila con menor `rowid` (la más antigua) y combina sus tickers en
+orden de aparición, sin repetirlos. Después elimina las demás filas y crea el
+índice; por ello el arranque es determinista, idempotente y no pierde símbolos.
+
 **Regla de autorización:** cada operación debe derivar `user_id` exclusivamente
 de la sesión autenticada; la consulta debe incluirlo (`WHERE user_id = ? AND id
 = ?`). Un UUID impredecible no sustituye esta comprobación. Las respuestas 404

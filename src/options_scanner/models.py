@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
+import unicodedata
 
 
 class OptionType(StrEnum):
@@ -22,6 +23,13 @@ def short_put_theta(contract_theta: float | None) -> float | None:
 def _require_text(value: str, field_name: str) -> None:
     if not value.strip():
         raise ValueError(f"{field_name} no puede estar vacío")
+
+
+def normalize_watchlist_name(value: str) -> tuple[str, str]:
+    """Return the display name and its stable, case-insensitive identity key."""
+    display_name = " ".join(unicodedata.normalize("NFKC", value).split())
+    _require_text(display_name, "name")
+    return display_name, display_name.casefold()
 
 
 @dataclass(frozen=True, slots=True)

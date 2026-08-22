@@ -446,7 +446,10 @@ class WebTest(TestCase):
         self.assertNotIn("Growth", request(bruno)[1])
         self.assertEqual(request(bruno, "POST", f"action=watchlist_delete&watchlist_id={item.id}")[0],
                          "400 Bad Request")
-        self.assertEqual(request(ana, "POST", f"action=watchlist_delete&watchlist_id={item.id}")[0], "200 OK")
+        delete_status, delete_page = request(ana, "POST", f"action=watchlist_delete&watchlist_id={item.id}")
+        self.assertEqual(delete_status, "200 OK")
+        self.assertNotIn("Watchlist: Growth", delete_page)
+        self.assertNotIn('value="Growth"', delete_page)
         self.assertEqual(store.watchlists_for("ana"), ())
 
     def test_create_watchlist_from_current_manual_input(self):
@@ -456,6 +459,22 @@ class WebTest(TestCase):
         self.assertEqual(status, "200 OK")
         self.assertEqual(store.watchlists_for("local")[0].symbols, ("AAPL", "MSFT"))
         self.assertIn("Lista manual", page)
+
+    def test_duplicate_watchlist_is_rejected_and_rendered_once(self):
+        store = UserWorkspaceStore()
+        store.add_user(User("local", "Local"))
+        app = create_app(StubService(), workspace_store=store)
+        create = "action=watchlist_create&watchlist_name=Techbeta&watchlist_tickers=NVDA%2C+AAPL"
+        self.assertEqual(request(app, "POST", create)[0], "200 OK")
+        status, page = request(
+            app, "POST",
+            "action=watchlist_create&watchlist_name=++TECHBETA++&watchlist_tickers=MSFT",
+        )
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn("Ya existe una watchlist con ese nombre.", page)
+        self.assertEqual(len(store.watchlists_for("local")), 1)
+        self.assertEqual(page.count("Watchlist: Techbeta"), 1)
+        self.assertEqual(page.count('value="Techbeta"'), 1)
 
     def test_ticker_list_normalizes_separators_case_and_duplicates(self):
         self.assertEqual(parse_tickers(" aaoi, NVDA  aaoi\tspy,QQQ "),
