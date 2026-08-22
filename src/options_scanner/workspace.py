@@ -8,6 +8,7 @@ from options_scanner.models import (
     StrategyParameters,
     User,
     Watchlist,
+    normalize_watchlist_name,
 )
 
 WorkspaceItem = TypeVar("WorkspaceItem", Watchlist, StrategyParameters, SavedScanResult)
@@ -32,10 +33,16 @@ class UserWorkspaceStore:
         self._users[user.id] = user
 
     def save_watchlist(self, watchlist: Watchlist) -> None:
+        display_name, name_key = normalize_watchlist_name(watchlist.name)
+        for existing in self._watchlists.get(watchlist.user_id, {}).values():
+            if existing.id != watchlist.id and normalize_watchlist_name(existing.name)[1] == name_key:
+                raise ValueError("Ya existe una watchlist con ese nombre.")
+        watchlist = Watchlist(watchlist.id, watchlist.user_id, display_name, watchlist.symbols)
         self._save(watchlist, self._watchlists)
 
     def watchlists_for(self, user_id: str) -> tuple[Watchlist, ...]:
-        return self._items_for(user_id, self._watchlists)
+        return tuple(sorted(self._items_for(user_id, self._watchlists),
+                            key=lambda item: (normalize_watchlist_name(item.name)[1], item.id)))
 
     def delete_watchlist(self, user_id: str, watchlist_id: str) -> None:
         """Delete one of ``user_id``'s lists without crossing user boundaries."""

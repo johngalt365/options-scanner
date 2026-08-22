@@ -17,7 +17,7 @@ import time
 from urllib.parse import parse_qs
 from uuid import uuid4
 
-from options_scanner.models import User, Watchlist
+from options_scanner.models import User, Watchlist, normalize_watchlist_name
 
 MAX_BODY = 16_384
 SECURITY_HEADERS = (
@@ -59,6 +59,48 @@ class SQLiteWorkspaceStore:
                   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                   key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id,key));
             """)
+            self._migrate_watchlist_names(db)
+
+    @staticmethod
+    def _migrate_watchlist_names(db):
+        """Merge legacy duplicates, retaining the oldest row and every ticker."""
+        columns = {row[1] for row in db.execute("PRAGMA table_info(watchlists)")}
+        if "name_key" not in columns:
+            db.execute("ALTER TABLE watchlists ADD COLUMN name_key TEXT")
+        rows = db.execute(
+            "SELECT rowid,id,user_id,name,symbols FROM watchlists ORDER BY rowid"
+        ).fetchall()
+        groups = {}
+        for row in rows:
+            display_name, name_key = normalize_watchlist_name(row[3])
+            groups.setdefault((row[2], name_key), []).append((row, display_name))
+        for (_, name_key), duplicates in groups.items():
+            keeper, display_name = duplicates[0]
+            merged = []
+            for row, _ in duplicates:
+                for symbol in json.loads(row[4]):
+                    if symbol not in merged:
+                        merged.append(symbol)
+            db.execute(
+                "UPDATE watchlists SET name=?,name_key=?,symbols=? WHERE rowid=?",
+                (display_name, name_key, json.dumps(merged), keeper[0]),
+            )
+            for row, _ in duplicates[1:]:
+                db.execute("DELETE FROM watchlists WHERE rowid=?", (row[0],))
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS watchlists_owner_name "
+            "ON watchlists(user_id,name_key)"
+        )
+        db.executescript("""
+            CREATE TRIGGER IF NOT EXISTS watchlists_name_key_insert
+            BEFORE INSERT ON watchlists WHEN NEW.name_key IS NULL OR NEW.name_key = ''
+            BEGIN SELECT RAISE(ABORT, 'watchlist name key required'); END;
+            CREATE TRIGGER IF NOT EXISTS watchlists_name_key_update
+            BEFORE UPDATE OF name_key ON watchlists WHEN NEW.name_key IS NULL OR NEW.name_key = ''
+            BEGIN SELECT RAISE(ABORT, 'watchlist name key required'); END;
+            DELETE FROM schema_version;
+            INSERT INTO schema_version(version) VALUES(2);
+        """)
 
     def add_user(self, user: User) -> None:
         try:
@@ -95,19 +137,32 @@ class SQLiteWorkspaceStore:
     def watchlists_for(self, user_id: str):
         self._require_user(user_id)
         with self._connect() as db:
-            rows = db.execute("SELECT id,name,symbols FROM watchlists WHERE user_id=? ORDER BY rowid", (user_id,)).fetchall()
+            rows = db.execute(
+                "SELECT id,name,symbols FROM watchlists WHERE user_id=? ORDER BY name_key,id",
+                (user_id,),
+            ).fetchall()
         return tuple(Watchlist(row[0], user_id, row[1], tuple(json.loads(row[2]))) for row in rows)
 
     def save_watchlist(self, item: Watchlist):
         self._require_user(item.user_id)
-        if len(item.symbols) > 50 or len(item.name) > 80:
+        name, name_key = normalize_watchlist_name(item.name)
+        if len(item.symbols) > 50 or len(name) > 80:
             raise ValueError("límite de watchlist excedido")
-        with self._connect() as db:
-            owned = db.execute("SELECT user_id FROM watchlists WHERE id=?", (item.id,)).fetchone()
-            if owned and owned[0] != item.user_id:
-                raise KeyError("watchlist desconocida para este usuario")
-            db.execute("INSERT INTO watchlists(id,user_id,name,symbols) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,symbols=excluded.symbols WHERE user_id=excluded.user_id",
-                       (item.id, item.user_id, item.name, json.dumps(item.symbols)))
+        try:
+            with self._connect() as db:
+                owned = db.execute("SELECT user_id FROM watchlists WHERE id=?", (item.id,)).fetchone()
+                if owned and owned[0] != item.user_id:
+                    raise KeyError("watchlist desconocida para este usuario")
+                db.execute(
+                    "INSERT INTO watchlists(id,user_id,name,name_key,symbols) VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET name=excluded.name,name_key=excluded.name_key,"
+                    "symbols=excluded.symbols WHERE user_id=excluded.user_id",
+                    (item.id, item.user_id, name, name_key, json.dumps(item.symbols)),
+                )
+        except sqlite3.IntegrityError as exc:
+            if "watchlists.user_id, watchlists.name_key" in str(exc):
+                raise ValueError("Ya existe una watchlist con ese nombre.") from exc
+            raise
 
     def delete_watchlist(self, user_id, watchlist_id):
         self._require_user(user_id)
@@ -123,7 +178,7 @@ class SQLiteWorkspaceStore:
 
     def ready(self):
         with self._connect() as db:
-            return db.execute("SELECT version FROM schema_version").fetchone() == (1,)
+            return db.execute("SELECT MAX(version) FROM schema_version").fetchone() == (2,)
 
 
 @dataclass

@@ -1,4 +1,6 @@
 from io import BytesIO
+import json
+import sqlite3
 import tempfile
 
 from options_scanner.models import User, Watchlist
@@ -61,6 +63,62 @@ def test_sqlite_persists_and_enforces_ownership_and_limits():
     try: second.save_watchlist(Watchlist("many", "a", "x", tuple("T" + str(i) for i in range(51))))
     except ValueError: pass
     else: raise AssertionError("watchlist limit missing")
+    tmp.close()
+
+
+def test_watchlist_names_are_unique_normalized_per_owner_and_survive_restart():
+    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+    store = SQLiteWorkspaceStore(tmp.name)
+    store.add_user(User("a", "A")); store.add_user(User("b", "B"))
+    store.save_watchlist(Watchlist("one", "a", "  Techbeta  ", ("NVDA",)))
+    assert store.watchlists_for("a")[0].name == "Techbeta"
+    for item_id, name in (("two", "Techbeta"), ("three", "TECHBETA"), ("four", " techbeta ")):
+        try:
+            store.save_watchlist(Watchlist(item_id, "a", name, ("AAPL",)))
+        except ValueError as exc:
+            assert str(exc) == "Ya existe una watchlist con ese nombre."
+        else:
+            raise AssertionError("duplicate watchlist name accepted")
+    store.save_watchlist(Watchlist("other", "a", "Other", ("MSFT",)))
+    try:
+        store.save_watchlist(Watchlist("other", "a", "techBETA", ("MSFT",)))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("rename to duplicate accepted")
+    store.save_watchlist(Watchlist("same-name-other-owner", "b", "TECHBETA", ("SPY",)))
+    restarted = SQLiteWorkspaceStore(tmp.name)
+    assert [item.name for item in restarted.watchlists_for("a")] == ["Other", "Techbeta"]
+    assert [item.name for item in restarted.watchlists_for("b")] == ["TECHBETA"]
+    restarted.delete_watchlist("a", "one")
+    assert [item.name for item in restarted.watchlists_for("a")] == ["Other"]
+    assert [item.name for item in restarted.watchlists_for("b")] == ["TECHBETA"]
+    tmp.close()
+
+
+def test_legacy_duplicate_migration_keeps_oldest_id_and_merges_tickers():
+    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
+    with sqlite3.connect(tmp.name) as db:
+        db.executescript("""
+            CREATE TABLE schema_version(version INTEGER PRIMARY KEY);
+            INSERT INTO schema_version VALUES(1);
+            CREATE TABLE users(id TEXT PRIMARY KEY, display_name TEXT NOT NULL);
+            INSERT INTO users VALUES('a','A');
+            CREATE TABLE watchlists(id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                                    name TEXT NOT NULL, symbols TEXT NOT NULL);
+            CREATE TABLE preferences(user_id TEXT, key TEXT, value TEXT);
+        """)
+        db.execute("INSERT INTO watchlists VALUES(?,?,?,?)", ("oldest", "a", " Techbeta ", json.dumps(["NVDA", "AAPL"])))
+        db.execute("INSERT INTO watchlists VALUES(?,?,?,?)", ("newer", "a", "TECHBETA", json.dumps(["AAPL", "MSFT"])))
+    store = SQLiteWorkspaceStore(tmp.name)
+    assert store.watchlists_for("a") == (Watchlist("oldest", "a", "Techbeta", ("NVDA", "AAPL", "MSFT")),)
+    with sqlite3.connect(tmp.name) as db:
+        assert db.execute("SELECT COUNT(*) FROM watchlists").fetchone() == (1,)
+        assert db.execute("SELECT MAX(version) FROM schema_version").fetchone() == (2,)
+        assert any(row[1] == "watchlists_owner_name" and row[2]
+                   for row in db.execute("PRAGMA index_list(watchlists)"))
+    # A second logical restart proves that the migration is idempotent.
+    assert SQLiteWorkspaceStore(tmp.name).watchlists_for("a") == store.watchlists_for("a")
     tmp.close()
 
 
