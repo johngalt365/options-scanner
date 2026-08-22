@@ -4,6 +4,25 @@ Base modular para una aplicación multiusuario de análisis de opciones. El MVP
 busca PUTs de NVDA por DTE, distancia al strike y delta. No implementa órdenes,
 login web, base de datos, Docker ni ejecución de operaciones.
 
+El universo soportado por este MVP se limita a **acciones de EE. UU. con opciones
+negociables y accesibles mediante Interactive Brokers**. Otros mercados, ETFs,
+índices y otros tipos de activo quedan fuera del alcance actual.
+
+## Estado de validación del MVP
+
+Queda pendiente como validación *live* no bloqueante repetir, con el mercado
+abierto, el smoke test multi-ticker `AEHR,LITE,ZZZZINVALID` y confirmar que los
+tickers válidos pueden procesarse normalmente con market data `RealTime`, mientras
+el ticker inválido queda aislado como error. Esta comprobación depende del horario,
+sesión y permisos de market data de IBKR y no se registra como bug bloqueante.
+
+Después del MVP, el roadmap contempla, sin implementación en esta versión:
+
+- horizontes históricos 2A/5A;
+- earnings;
+- expansión a otros universos y tipos de activo;
+- documentación funcional completa de la aplicación.
+
 ## Arquitectura
 
 ```text

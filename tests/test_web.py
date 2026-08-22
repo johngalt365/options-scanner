@@ -369,13 +369,20 @@ class WebTest(TestCase):
             self.assertIn(f"<legend>{group}</legend>", page)
         self.assertIn('class="control-label">Distancia mínima<br>al strike (%)', page)
         self.assertIn('class="control-label">Theta short<br>mínimo', page)
-        self.assertEqual(page.count('class="help-trigger"'), 8)
-        self.assertEqual(page.count('role="tooltip"'), 8)
-        for help_id in ("help-min-dte", "help-max-dte", "help-distance", "help-min-delta",
+        self.assertEqual(page.count('class="help-trigger"'), 9)
+        self.assertEqual(page.count('role="tooltip"'), 9)
+        for help_id in ("help-universe", "help-min-dte", "help-max-dte", "help-distance", "help-min-delta",
                         "help-max-delta", "help-iv", "help-theta"):
             self.assertIn(f'aria-describedby="{help_id}"', page)
             self.assertIn(f'id="{help_id}" role="tooltip"', page)
         self.assertIn('id="help-history" role="tooltip"', page)
+        self.assertIn("Universo soportado: acciones de EE. UU. con opciones negociables en IBKR.", page)
+        for universe_help_text in (
+            "Esta versión está diseñada para acciones de EE. UU.",
+            "opciones accesibles mediante Interactive Brokers.",
+            "Otros mercados, ETFs, índices y otros tipos de activo no forman parte actualmente",
+        ):
+            self.assertIn(universe_help_text, page)
         for history_help_text in (
             "3M / 6M / 1A: analizan soportes y resistencias utilizando únicamente ese horizonte histórico.",
             "Multi: analiza independientemente 3M, 6M y 1A y busca confluencias",
