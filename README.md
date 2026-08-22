@@ -1,8 +1,47 @@
 # Options Scanner
 
 Base modular para una aplicación multiusuario de análisis de opciones. El MVP
-busca PUTs de NVDA por DTE, distancia al strike y delta. No implementa órdenes,
-login web, base de datos, Docker ni ejecución de operaciones.
+busca PUTs de NVDA por DTE, distancia al strike y delta. No implementa órdenes
+ni ejecución de operaciones.
+
+## Private beta P0 (sin despliegue)
+
+La frontera beta implementada es `HTTPS reverse proxy → WSGI → SQLite →
+providers`, para **un proceso** y un máximo operativo de tres usuarios. La app
+incluye una allowlist local con passwords `scrypt`, sesiones opacas expirables,
+logout, identidad WSGI por request, CSRF y headers defensivos. Demo está
+disponible; IBKR live devuelve 403 para el rol `tester` y no se considera en
+readiness. No se guardan credenciales, cookies, tokens ni account IDs de IBKR.
+
+Configuración (véase `.env.example`): `OPTIONS_SCANNER_DB` debe apuntar a un
+volumen durable; cookies seguras deben quedar activas detrás de HTTPS.
+`OPTIONS_SCANNER_IBKR_BASE_URL` es configuración exclusiva del servidor, nunca
+input web. HSTS se debe añadir **sólo en el reverse proxy una vez validado TLS**.
+No se habilita CORS. El proxy también debe limitar el body a 16 KiB y aplicar
+timeouts; la app vuelve a comprobar el tamaño.
+
+Creación manual de los 2–3 usuarios (contraseña de al menos 12 caracteres):
+
+```bash
+PYTHONPATH=src python - <<'PY'
+import getpass, os
+from options_scanner.private_beta import SQLiteWorkspaceStore
+s = SQLiteWorkspaceStore(os.environ['OPTIONS_SCANNER_DB'])
+s.add_login(input('username: '), getpass.getpass(), input('display name: '), 'tester')
+PY
+```
+
+El arranque WSGI de producción debe construir `create_app` con el mismo store y
+envolverlo en `create_private_beta_app`; use un servidor WSGI con un solo worker
+tras un proxy HTTPS. Antes de Internet: TLS real, HSTS en proxy, secretos/env,
+permisos del volumen, backup restaurado de prueba, logs centralizados, timeout
+del proxy y smoke tests de login/CSRF/Demo. Backup consistente:
+`sqlite3 "$OPTIONS_SCANNER_DB" '.backup /ruta/backup.sqlite3'`.
+
+Límites P0: 20 tickers/scan, 50/watchlist, nombres de 80 caracteres, body de
+16 KiB, 1 scan activo/usuario, 2 globales, cola global de 3 (espera máxima de
+2 segundos) y 4 requests concurrentes al provider. Live individual por tester
+queda fuera hasta disponer de una sesión IBKR aislada por usuario.
 
 El universo soportado por este MVP se limita a **acciones de EE. UU. con opciones
 negociables y accesibles mediante Interactive Brokers**. Otros mercados, ETFs,
@@ -122,9 +161,9 @@ duplicados preservando su orden y muestra varios resultados en un screener
 comparativo compacto. Cada detalle se abre bajo demanda y su gráfico permanece
 cerrado inicialmente. Los scans usan por defecto un pool limitado
 (`ticker_workers=3` en `create_app`) configurable entre 1 y 4. Un semáforo
-compartido (`global_http_limit=8`) limita conjuntamente los tickers y los 8
+compartido (`global_http_limit=4`) limita conjuntamente los tickers y los 8
 workers internos de `secdef/info`: la concurrencia HTTP efectiva predeterminada
-nunca supera 8, no 3×8. Un fallo o timeout se confina a su fila y los resultados
+nunca supera 4, no 3×8. Un fallo o timeout se confina a su fila y los resultados
 se recogen en el orden original. Como la implementación continúa siendo WSGI estándar y no
 añade streaming ni dependencias, el progreso identifica el lote activo pero la
 tabla se incorpora al terminar la respuesta completa, no fila a fila.

@@ -429,7 +429,7 @@ class WebTest(TestCase):
         item = store.watchlists_for("ana")[0]
         self.assertEqual(item.symbols, ("NVDA", "SPY"))
         self.assertIn("Watchlist: Core", page)
-        self.assertIn("solo en memoria", page)
+        self.assertIn("exclusivamente al usuario autenticado", page)
 
         update = (f"action=watchlist_update&watchlist_id={item.id}&watchlist_name=Growth"
                   "&watchlist_tickers=qqq+MSFT+qqq")
