@@ -59,22 +59,62 @@ class PrivateBetaConfig:
         return cls(database, environment, secure, env.get("OPTIONS_SCANNER_HOST", "127.0.0.1"), port, seconds, public_url)
 
 
-def build_application(config: PrivateBetaConfig):
+def build_application(config: PrivateBetaConfig, *, debug_migrations: bool = False):
     store = _store(config)
+    if debug_migrations:
+        report = store.last_watchlist_migration
+        print("Watchlist migration: " + ", ".join(
+            f"{key}={str(value).lower() if isinstance(value, bool) else value}"
+            for key, value in report.items()
+        ))
     scanner_app = create_app(workspace_store=store)
     return create_private_beta_app(scanner_app, store, secure_cookies=config.secure_cookies,
                                    session_seconds=config.session_seconds)
 
 
 def _store(config: PrivateBetaConfig) -> SQLiteWorkspaceStore:
-    parent = Path(config.database).expanduser().resolve().parent
+    database = Path(config.database).expanduser().resolve()
+    parent = database.parent
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    store = SQLiteWorkspaceStore(config.database)
+    store = SQLiteWorkspaceStore(str(database))
     try:
-        os.chmod(config.database, 0o600)
+        os.chmod(database, 0o600)
     except OSError:
         pass
     return store
+
+
+def inspect_database(path: str) -> None:
+    """Print only watchlist schema/data from SQLite, using a read-only handle."""
+    database = Path(path).expanduser().resolve()
+    print(f"database: {database}")
+    with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as db:
+        versions = db.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
+        print(f"schema_version: {versions}")
+        table_info = db.execute("PRAGMA table_info(watchlists)").fetchall()
+        print(f"PRAGMA table_info(watchlists): {table_info}")
+        indexes = db.execute("PRAGMA index_list(watchlists)").fetchall()
+        print(f"PRAGMA index_list(watchlists): {indexes}")
+        for index in indexes:
+            # The name comes from SQLite itself; quoting also handles odd names.
+            quoted = index[1].replace('"', '""')
+            info = db.execute(f'PRAGMA index_info("{quoted}")').fetchall()
+            print(f"PRAGMA index_info({index[1]}): {info}")
+        triggers = db.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='watchlists' "
+            "ORDER BY name"
+        ).fetchall()
+        print(f"watchlists triggers: {triggers}")
+        columns = {row[1] for row in table_info}
+        ticker_column = "tickers" if "tickers" in columns else "symbols"
+        name_key = "name_key" if "name_key" in columns else "NULL"
+        rows = db.execute(
+            f'SELECT rowid,id,user_id,name,{name_key},{ticker_column} '
+            'FROM watchlists ORDER BY rowid'
+        ).fetchall()
+        print("watchlists rows (rowid, id, user_id, name, name_key, tickers):")
+        for row in rows:
+            print(repr(row))
 
 
 def create_user(config: PrivateBetaConfig, role: str) -> int:
@@ -100,9 +140,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init-db", help="crear/inicializar la SQLite configurada")
     user_parser = sub.add_parser("create-user", help="crear un usuario sin password en argumentos")
     user_parser.add_argument("--role", choices=("operator", "tester"), required=True)
-    sub.add_parser("serve", help="arrancar la Private Beta")
+    serve_parser = sub.add_parser("serve", help="arrancar la Private Beta")
+    serve_parser.add_argument("--debug-migrations", action="store_true",
+                              help="mostrar un resumen de la reparación de watchlists")
+    sub.add_parser("inspect-db", help="inspeccionar la SQLite configurada en modo sólo lectura")
     args = parser.parse_args(argv)
     try:
+        if args.command == "inspect-db":
+            database = os.environ.get("OPTIONS_SCANNER_DB", "").strip()
+            if not database:
+                raise ConfigurationError("Falta OPTIONS_SCANNER_DB (ruta al fichero SQLite).")
+            inspect_database(database)
+            return 0
         config = PrivateBetaConfig.from_environ()
         if args.command == "init-db":
             _store(config)
@@ -110,11 +159,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "create-user":
             return create_user(config, args.role)
-        app = build_application(config)
+        app = build_application(config, debug_migrations=args.debug_migrations)
     except (ConfigurationError, OSError, sqlite3.Error) as exc:
         print(f"Error de configuración Private Beta: {exc}", file=sys.stderr)
         return 2
     scheme = "https" if config.secure_cookies else "http"
+    print(f"SQLite Private Beta: {Path(config.database).expanduser().resolve()}")
     print(f"Private Beta ({config.environment}): {scheme}://{config.host}:{config.port}")
     with make_server(config.host, config.port, app) as server:
         server.serve_forever()
