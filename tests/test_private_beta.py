@@ -50,6 +50,44 @@ def test_auth_login_csrf_logout_headers_and_health():
     tmp.close()
 
 
+def test_login_page_has_accessible_responsive_controls_and_local_ux():
+    tmp, store, app = fixture()
+    seen, body = call(app, "/login")
+    page = body.decode()
+
+    assert seen["status"] == "200 OK"
+    assert '<meta name="viewport"' in page
+    assert "PUT Options Scanner" in page
+    assert "Beta privada" in page
+    assert "Acceso exclusivo para usuarios autorizados." in page
+    assert '<h2 id="login-title">Iniciar sesión</h2>' in page
+    assert '<label for="username">Usuario</label>' in page
+    assert ('id="username" name="username" maxlength="80" '
+            'autocomplete="username" autofocus required') in page
+    assert '<label for="password">Contraseña</label>' in page
+    assert 'autocomplete="current-password" required' in page
+    assert ('type="button" aria-controls="password" aria-pressed="false">Mostrar'
+            in page)
+    assert '<button class="submit-button" type="submit">Entrar</button>' in page
+    assert "submit.textContent='Entrando…'" in page
+    assert "No ejecuta ni ofrece operaciones de trading." in page
+    assert "https://" not in page and "http://" not in page
+    tmp.close()
+
+
+def test_invalid_login_uses_generic_error_inside_card():
+    tmp, store, app = fixture()
+    seen, body = call(app, "/login", "POST", "username=desconocido&password=wrong")
+    page = body.decode()
+
+    assert seen["status"] == "401 Unauthorized"
+    assert '<section class="login-card"' in page
+    assert ('<p class="login-error" role="alert">'
+            'Usuario o contraseña incorrectos.</p>') in page
+    assert "desconocido" not in page
+    tmp.close()
+
+
 def test_sqlite_persists_and_enforces_ownership_and_limits():
     tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3")
     first = SQLiteWorkspaceStore(tmp.name)
