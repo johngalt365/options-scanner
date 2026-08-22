@@ -1,0 +1,27 @@
+[Unit]
+Description=PUT Options Scanner Private Beta
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=options-scanner
+Group=options-scanner
+WorkingDirectory=/opt/options-scanner/app
+EnvironmentFile=/etc/options-scanner/options-scanner.env
+Environment=PYTHONPATH=/opt/options-scanner/app/src
+ExecStart=/opt/options-scanner/venv/bin/gunicorn --config deploy/gunicorn.conf.py options_scanner.production:application
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+UMask=0077
+LimitNOFILE=4096
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/options-scanner
+
+[Install]
+WantedBy=multi-user.target

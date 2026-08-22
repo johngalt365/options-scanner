@@ -47,6 +47,8 @@ class PrivateBetaConfig:
         public_url = env.get("OPTIONS_SCANNER_PUBLIC_URL", "").strip()
         if environment == "production" and not public_url.startswith("https://"):
             raise ConfigurationError("Producción exige OPTIONS_SCANNER_PUBLIC_URL con esquema https://.")
+        if environment == "production" and not Path(database).expanduser().is_absolute():
+            raise ConfigurationError("Producción exige una ruta SQLite absoluta.")
         if environment != "local-smoke" and not secure:
             raise ConfigurationError("Las cookies no Secure sólo se permiten en local-smoke.")
         try:
@@ -56,7 +58,10 @@ class PrivateBetaConfig:
             raise ConfigurationError("PORT y SESSION_SECONDS deben ser enteros.") from exc
         if not 1 <= port <= 65535 or not 60 <= seconds <= 28_800:
             raise ConfigurationError("PORT o SESSION_SECONDS fuera del rango seguro.")
-        return cls(database, environment, secure, env.get("OPTIONS_SCANNER_HOST", "127.0.0.1"), port, seconds, public_url)
+        host = env.get("OPTIONS_SCANNER_HOST", "127.0.0.1").strip()
+        if environment == "production" and host != "127.0.0.1":
+            raise ConfigurationError("Producción sólo puede enlazar con 127.0.0.1.")
+        return cls(database, environment, secure, host, port, seconds, public_url)
 
 
 def build_application(config: PrivateBetaConfig, *, debug_migrations: bool = False):
