@@ -4,6 +4,56 @@ Base modular para una aplicación multiusuario de análisis de opciones. El MVP
 busca PUTs de NVDA por DTE, distancia al strike y delta. No implementa órdenes
 ni ejecución de operaciones.
 
+## Modos de ejecución soportados
+
+### 1. Local/desarrollo (sin autenticación)
+
+`./run_web.sh` conserva el entorno local existente en
+<http://127.0.0.1:8000/>. Usa el workspace en memoria y la identidad local; no
+debe exponerse a una red ni se considera un modo Private Beta.
+
+### 2. Private Beta local smoke (auth + SQLite + HTTP)
+
+Esta es la única configuración que permite cookies sin `Secure`, explícitamente
+para HTTP en loopback. Las variables deben exportarse (la aplicación no ejecuta
+ni interpreta automáticamente ficheros `.env`):
+
+```bash
+export OPTIONS_SCANNER_ENV=local-smoke
+export OPTIONS_SCANNER_DB="$PWD/data/private-beta-smoke.sqlite3"
+export OPTIONS_SCANNER_SECURE_COOKIES=0
+export OPTIONS_SCANNER_HOST=127.0.0.1
+export OPTIONS_SCANNER_PORT=8000
+
+PYTHONPATH=src python -m options_scanner.private_beta_entrypoint init-db
+PYTHONPATH=src python -m options_scanner.private_beta_entrypoint create-user --role operator
+PYTHONPATH=src python -m options_scanner.private_beta_entrypoint create-user --role tester
+./run_private_beta.sh
+```
+
+`create-user` solicita username, display name y dos veces la contraseña mediante
+entrada interactiva oculta (`getpass`); la contraseña nunca aparece en los
+argumentos del proceso ni se guarda en claro. Debe tener al menos 12 caracteres.
+
+### 3. Private Beta producción (auth + SQLite persistente + HTTPS)
+
+Producción exige `OPTIONS_SCANNER_ENV=production`,
+`OPTIONS_SCANNER_SECURE_COOKIES=1` y una
+`OPTIONS_SCANNER_PUBLIC_URL=https://…`; una combinación insegura aborta antes
+de escuchar. SQLite debe vivir en volumen persistente con permisos restringidos.
+El servidor permanece en loopback detrás de un reverse proxy HTTPS. Este
+repositorio **no** despliega proxy, dominio ni TLS; `wsgiref` es adecuado para el
+smoke, no el servidor WSGI endurecido de Internet.
+
+```bash
+export OPTIONS_SCANNER_ENV=production
+export OPTIONS_SCANNER_DB=/var/lib/options-scanner/beta.sqlite3
+export OPTIONS_SCANNER_SECURE_COOKIES=1
+export OPTIONS_SCANNER_PUBLIC_URL=https://beta.example.com
+export OPTIONS_SCANNER_HOST=127.0.0.1
+./run_private_beta.sh
+```
+
 ## Private beta P0 (sin despliegue)
 
 La frontera beta implementada es `HTTPS reverse proxy → WSGI → SQLite →
@@ -20,19 +70,14 @@ input web. HSTS se debe añadir **sólo en el reverse proxy una vez validado TLS
 No se habilita CORS. El proxy también debe limitar el body a 16 KiB y aplicar
 timeouts; la app vuelve a comprobar el tamaño.
 
-Creación manual de los 2–3 usuarios (contraseña de al menos 12 caracteres):
+Creación soportada de los 2–3 usuarios (contraseña de al menos 12 caracteres):
 
 ```bash
-PYTHONPATH=src python - <<'PY'
-import getpass, os
-from options_scanner.private_beta import SQLiteWorkspaceStore
-s = SQLiteWorkspaceStore(os.environ['OPTIONS_SCANNER_DB'])
-s.add_login(input('username: '), getpass.getpass(), input('display name: '), 'tester')
-PY
+PYTHONPATH=src python -m options_scanner.private_beta_entrypoint create-user --role tester
 ```
 
-El arranque WSGI de producción debe construir `create_app` con el mismo store y
-envolverlo en `create_private_beta_app`; use un servidor WSGI con un solo worker
+El entrypoint `run_private_beta.sh` construye `create_app` con el mismo store y
+lo envuelve en `create_private_beta_app`; en Internet use un servidor WSGI con un solo worker
 tras un proxy HTTPS. Antes de Internet: TLS real, HSTS en proxy, secretos/env,
 permisos del volumen, backup restaurado de prueba, logs centralizados, timeout
 del proxy y smoke tests de login/CSRF/Demo. Backup consistente:

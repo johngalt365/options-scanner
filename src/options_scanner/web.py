@@ -873,10 +873,13 @@ def create_app(service: PutScanService | None = None, *, base_url: str = "https:
     scan_cache: dict[tuple[str, str], ScanResult] = {}
     store = workspace_store or UserWorkspaceStore()
     default_user = user or User("local", "Usuario local")
-    try:
-        store.watchlists_for(default_user.id)
-    except KeyError:
-        store.add_user(default_user)
+    # A supplied durable store is request-authenticated in Private Beta: never
+    # create/use the local development identity there unless explicitly requested.
+    if not getattr(store, "request_identity_required", False) or user is not None:
+        try:
+            store.watchlists_for(default_user.id)
+        except KeyError:
+            store.add_user(default_user)
     for key, symbols in (watchlists or {}).items():
         store.save_watchlist(Watchlist(key, default_user.id, key, tuple(symbols)))
     def application(environ, start_response):
