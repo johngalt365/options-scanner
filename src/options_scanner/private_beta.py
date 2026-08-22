@@ -269,7 +269,7 @@ class PrivateBetaMiddleware:
             data = self._form(environ)
             authenticated = self.store.authenticate(data.get("username", "")[:80], data.get("password", "")[:256])
             if not authenticated:
-                return respond("401 Unauthorized", [("Content-Type", "text/html; charset=utf-8")], self._login_page("Credenciales no válidas."))
+                return respond("401 Unauthorized", [("Content-Type", "text/html; charset=utf-8")], self._login_page("Usuario o contraseña incorrectos."))
             user, role, username = authenticated
             sid = secrets.token_urlsafe(32); session = _Session(user, role, username, secrets.token_urlsafe(32), time.time() + self.session_seconds)
             with self._lock: self._sessions[sid] = session
@@ -380,9 +380,81 @@ class PrivateBetaMiddleware:
     @staticmethod
     def _login_page(error=""):
         from html import escape
-        return ("<!doctype html><html lang=es><meta charset=utf-8><title>Acceso beta</title><h1>Short PUT Scanner — beta privada</h1>"
-                + (f"<p role=alert>{escape(error)}</p>" if error else "")
-                + '<form method=post><label>Usuario <input name=username maxlength=80 required></label><label>Contraseña <input type=password name=password maxlength=256 required></label><button>Entrar</button></form></html>').encode()
+        alert = (f'<p class="login-error" role="alert">{escape(error)}</p>'
+                 if error else "")
+        return f'''<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Acceso | PUT Options Scanner</title>
+<style>
+*{{box-sizing:border-box}}
+html,body{{min-height:100%}}
+body{{margin:0;background:#f4f6fa;color:#182033;font:15px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+.login-page{{min-height:100vh;min-height:100svh;display:grid;place-items:center;padding:2rem 1rem}}
+.login-shell{{width:100%;max-width:400px}}
+.product-heading{{margin:0 0 1.5rem;text-align:center}}
+.product-heading h1{{margin:0;font-size:1.65rem;line-height:1.2;letter-spacing:-.02em}}
+.eyebrow{{margin:.45rem 0 0;color:#2358d5;font-size:.78rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase}}
+.intro{{margin:.65rem 0 0;color:#596273;line-height:1.5}}
+.login-card{{padding:1.5rem;background:#fff;border:1px solid #e1e5ec;border-radius:10px;box-shadow:0 2px 8px #0001}}
+.login-card h2{{margin:0 0 1.25rem;font-size:1.2rem}}
+.login-error{{margin:0 0 1rem;padding:.75rem .85rem;background:#fff0f0;border-left:4px solid #c22;border-radius:5px;color:#7d1d25;line-height:1.4}}
+.field{{margin-top:1rem}}
+.field:first-of-type{{margin-top:0}}
+label{{display:block;margin-bottom:.4rem;font-weight:650}}
+.input-wrap{{position:relative}}
+input{{display:block;width:100%;height:2.75rem;padding:.65rem .75rem;border:1px solid #aab3c5;border-radius:5px;background:#fff;color:#182033;font:inherit}}
+input[type="password"],input.password-visible{{padding-right:5.6rem}}
+input:hover{{border-color:#778196}}
+input:focus-visible,button:focus-visible{{outline:3px solid #8cacf5;outline-offset:2px}}
+input:focus{{border-color:#2358d5}}
+.password-toggle{{position:absolute;top:50%;right:.35rem;transform:translateY(-50%);padding:.35rem .45rem;background:transparent;border:0;border-radius:4px;color:#2358d5;font:inherit;font-size:.82rem;font-weight:700;cursor:pointer}}
+.submit-button{{width:100%;margin-top:1.25rem;padding:.72rem 1.4rem;border:0;border-radius:5px;background:#2358d5;color:#fff;font:inherit;font-weight:700;cursor:pointer}}
+.submit-button:hover{{background:#1d4bb9}}
+.submit-button:disabled{{cursor:not-allowed;opacity:.65}}
+.disclaimer{{margin:1.25rem auto 0;max-width:370px;color:#687386;font-size:.78rem;line-height:1.5;text-align:center}}
+@media(max-width:430px){{.login-page{{align-items:start;padding-top:clamp(2rem,12vh,5rem)}}.login-card{{padding:1.25rem}}.product-heading h1{{font-size:1.45rem}}}}
+@media(prefers-reduced-motion:reduce){{*{{scroll-behavior:auto!important}}}}
+</style>
+</head>
+<body>
+<main class="login-page">
+  <div class="login-shell">
+    <header class="product-heading">
+      <h1>PUT Options Scanner</h1>
+      <p class="eyebrow">Beta privada</p>
+      <p class="intro">Acceso exclusivo para usuarios autorizados.</p>
+    </header>
+    <section class="login-card" aria-labelledby="login-title">
+      <h2 id="login-title">Iniciar sesión</h2>
+      {alert}
+      <form method="post" id="login-form">
+        <div class="field">
+          <label for="username">Usuario</label>
+          <input id="username" name="username" maxlength="80" autocomplete="username" autofocus required>
+        </div>
+        <div class="field">
+          <label for="password">Contraseña</label>
+          <div class="input-wrap">
+            <input id="password" type="password" name="password" maxlength="256" autocomplete="current-password" required>
+            <button class="password-toggle" type="button" aria-controls="password" aria-pressed="false">Mostrar</button>
+          </div>
+        </div>
+        <button class="submit-button" type="submit">Entrar</button>
+      </form>
+    </section>
+    <p class="disclaimer">Herramienta de análisis de opciones sobre acciones de EE. UU. No ejecuta ni ofrece operaciones de trading.</p>
+  </div>
+</main>
+<script>
+const form=document.querySelector('#login-form'),password=document.querySelector('#password'),toggle=document.querySelector('.password-toggle'),submit=document.querySelector('.submit-button');
+toggle.addEventListener('click',()=>{{const visible=password.type==='text';password.type=visible?'password':'text';password.classList.toggle('password-visible',!visible);toggle.textContent=visible?'Mostrar':'Ocultar';toggle.setAttribute('aria-pressed',String(!visible));}});
+form.addEventListener('submit',()=>{{submit.disabled=true;submit.textContent='Entrando…';}});
+</script>
+</body>
+</html>'''.encode()
 
 
 def create_private_beta_app(scanner_app, store, **kwargs):
