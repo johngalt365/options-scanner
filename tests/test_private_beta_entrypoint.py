@@ -31,6 +31,16 @@ def test_configuration_requires_explicit_safe_cookie_mode():
         PrivateBetaConfig.from_environ({})
 
 
+def test_production_requires_absolute_database_and_loopback_bind():
+    base = config_env(OPTIONS_SCANNER_ENV="production",
+                      OPTIONS_SCANNER_SECURE_COOKIES="1",
+                      OPTIONS_SCANNER_PUBLIC_URL="https://beta.example.test")
+    with pytest.raises(ConfigurationError, match="absoluta"):
+        PrivateBetaConfig.from_environ({**base, "OPTIONS_SCANNER_DB": "beta.sqlite3"})
+    with pytest.raises(ConfigurationError, match="127.0.0.1"):
+        PrivateBetaConfig.from_environ({**base, "OPTIONS_SCANNER_HOST": "0.0.0.0"})
+
+
 def test_entrypoint_builds_auth_app_without_local_user():
     with tempfile.NamedTemporaryFile(suffix=".sqlite3") as database:
         config = PrivateBetaConfig(database.name, "local-smoke", False)

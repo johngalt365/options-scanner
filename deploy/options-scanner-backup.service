@@ -1,0 +1,13 @@
+[Unit]
+Description=Consistent Options Scanner SQLite backup
+
+[Service]
+Type=oneshot
+User=options-scanner
+Group=options-scanner
+EnvironmentFile=/etc/options-scanner/options-scanner.env
+ExecStart=/opt/options-scanner/app/deploy/backup-sqlite.sh
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/backups/options-scanner

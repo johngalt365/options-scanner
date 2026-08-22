@@ -243,7 +243,10 @@ class PrivateBetaMiddleware:
         self.log = logging.getLogger("options_scanner.requests")
 
     def __call__(self, environ, start_response):
-        started, request_id = time.monotonic(), uuid4().hex
+        started = time.monotonic()
+        incoming_request_id = environ.get("HTTP_X_REQUEST_ID", "")
+        request_id = (incoming_request_id if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", incoming_request_id)
+                      else uuid4().hex)
         path, method = environ.get("PATH_INFO", "/"), environ.get("REQUEST_METHOD", "GET")
         status_seen = ["500 Internal Server Error"]
         def respond(status, headers, body=b""):
@@ -358,7 +361,7 @@ class PrivateBetaMiddleware:
                     self._active_global -= 1
                     self._active_users.discard(session.user.id)
                     self._admission.notify()
-            self.log.info("request", extra={"request_id": request_id, "user_id": session.user.id,
+            self.log.info("request", extra={"request_id": request_id,
                           "endpoint": path, "duration_ms": round((time.monotonic()-started)*1000),
                           "status": status_seen[0].split()[0]})
 
